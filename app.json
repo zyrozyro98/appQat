@@ -4,10 +4,10 @@
     "slug": "qat-app",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/images/icon.png",
     "userInterfaceStyle": "light",
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "./assets/images/splash.png",
       "resizeMode": "contain",
       "backgroundColor": "#2E7D32"
     },
@@ -26,7 +26,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#2E7D32"
       },
       "package": "com.qatapp.qat",
@@ -39,7 +39,7 @@
       ]
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       [
@@ -51,9 +51,8 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/notification-icon.png",
-          "color": "#2E7D32",
-          "sounds": ["./assets/notification-sound.wav"]
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#2E7D32"
         }
       ]
     ],
