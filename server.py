@@ -1,1603 +1,1064 @@
-# server.py (محدث)
-import os
-import json
-import sqlite3
-import random
-import string
-from datetime import datetime, timedelta
-from functools import wraps
-import pandas as pd
-from flask import Flask, request, jsonify, send_file, send_from_directory, make_response
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import jwt
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey
+from sqlalchemy.orm import relationship
+from datetime import datetime, timedelta
+import json
+import os
+import csv
+import pandas as pd
+from io import BytesIO
+import secrets
 import hashlib
-from werkzeug.utils import secure_filename
-
-app = Flask(__name__, static_folder='.', static_url_path='')
-CORS(app, supports_credentials=True)
+import jwt
+from functools import wraps
+import logging
 
 # Configuration
-app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
-app.config['DATABASE'] = 'qat_database.db'
-app.config['BACKUP_FOLDER'] = 'backups'
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app = Flask(__name__)
+CORS(app)
+app.config['SECRET_KEY'] = 'your-secret-key-change-this-in-production'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///qat_app.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Allowed file extensions
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf', 'xlsx', 'csv'}
+# Database
+db = SQLAlchemy(app)
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+# Models
+class User(db.Model):
+    __tablename__ = 'users'
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    email = Column(String(100), unique=True, nullable=False)
+    phone = Column(String(20), nullable=False)
+    password_hash = Column(String(200), nullable=False)
+    user_type = Column(String(20), nullable=False)  # admin, seller, buyer, driver, washer
+    balance = Column(Float, default=0.0)
+    store_name = Column(String(100))
+    vehicle_type = Column(String(50))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String(20), default='active')
+    
+    # Relationships
+    products = relationship('Product', backref='seller', lazy=True)
+    orders_as_buyer = relationship('Order', foreign_keys='Order.buyer_id', backref='buyer', lazy=True)
+    orders_as_seller = relationship('Order', foreign_keys='Order.seller_id', backref='seller', lazy=True)
+    advertisements = relationship('Advertisement', backref='user', lazy=True)
+    withdrawals = relationship('Withdrawal', backref='user', lazy=True)
+    
+    def set_password(self, password):
+        self.password_hash = hashlib.sha256(password.encode()).hexdigest()
+    
+    def check_password(self, password):
+        return self.password_hash == hashlib.sha256(password.encode()).hexdigest()
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'email': self.email,
+            'phone': self.phone,
+            'user_type': self.user_type,
+            'balance': self.balance,
+            'store_name': self.store_name,
+            'vehicle_type': self.vehicle_type,
+            'created_at': self.created_at.isoformat()
+        }
 
-# Database initialization
-def init_db():
-    conn = sqlite3.connect(app.config['DATABASE'])
-    cursor = conn.cursor()
+class Market(db.Model):
+    __tablename__ = 'markets'
     
-    # Users table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            phone TEXT NOT NULL,
-            password TEXT NOT NULL,
-            user_type TEXT NOT NULL,  # buyer, seller, driver, admin
-            store_name TEXT,
-            store_description TEXT,
-            wallet_balance REAL DEFAULT 0,
-            rating REAL DEFAULT 0,
-            total_orders INTEGER DEFAULT 0,
-            active BOOLEAN DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    location = Column(String(200))
+    address = Column(Text)
+    phone = Column(String(20))
+    manager_name = Column(String(100))
+    status = Column(String(20), default='active')
+    created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Markets table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS markets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            city TEXT NOT NULL,
-            address TEXT,
-            latitude REAL,
-            longitude REAL,
-            active BOOLEAN DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Washing stations table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS washing_stations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_id INTEGER,
-            name TEXT NOT NULL,
-            owner_name TEXT,
-            phone TEXT,
-            address TEXT,
-            capacity INTEGER,
-            active BOOLEAN DEFAULT 1,
-            FOREIGN KEY (market_id) REFERENCES markets (id)
-        )
-    ''')
-    
-    # Drivers table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS drivers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER UNIQUE,
-            name TEXT NOT NULL,
-            phone TEXT NOT NULL,
-            vehicle_type TEXT,
-            vehicle_number TEXT,
-            current_location TEXT,
-            available BOOLEAN DEFAULT 1,
-            rating REAL DEFAULT 0,
-            total_deliveries INTEGER DEFAULT 0,
-            active BOOLEAN DEFAULT 1,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
-    
-    # Products table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            seller_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            description TEXT,
-            price REAL NOT NULL,
-            type TEXT,
-            stock INTEGER DEFAULT 0,
-            washing_available BOOLEAN DEFAULT 0,
-            rating REAL DEFAULT 0,
-            total_sales INTEGER DEFAULT 0,
-            images TEXT,
-            active BOOLEAN DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (seller_id) REFERENCES users (id)
-        )
-    ''')
-    
-    # Orders table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_number TEXT UNIQUE NOT NULL,
-            buyer_id INTEGER NOT NULL,
-            seller_id INTEGER NOT NULL,
-            market_id INTEGER,
-            washing_station_id INTEGER,
-            driver_id INTEGER,
-            total_amount REAL NOT NULL,
-            washing_amount REAL DEFAULT 0,
-            delivery_fee REAL DEFAULT 0,
-            status TEXT DEFAULT 'pending',  # pending, confirmed, preparing, washing, delivering, delivered, cancelled
-            payment_method TEXT,
-            payment_status TEXT DEFAULT 'pending',
-            delivery_address TEXT,
-            sales_code TEXT UNIQUE,
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (buyer_id) REFERENCES users (id),
-            FOREIGN KEY (seller_id) REFERENCES users (id),
-            FOREIGN KEY (market_id) REFERENCES markets (id),
-            FOREIGN KEY (washing_station_id) REFERENCES washing_stations (id),
-            FOREIGN KEY (driver_id) REFERENCES drivers (id)
-        )
-    ''')
-    
-    # Order items table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS order_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id INTEGER NOT NULL,
-            product_id INTEGER NOT NULL,
-            quantity INTEGER NOT NULL,
-            unit_price REAL NOT NULL,
-            washing BOOLEAN DEFAULT 0,
-            washing_price REAL DEFAULT 0,
-            FOREIGN KEY (order_id) REFERENCES orders (id),
-            FOREIGN KEY (product_id) REFERENCES products (id)
-        )
-    ''')
-    
-    # Transactions table (for wallet)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            type TEXT NOT NULL,  # deposit, withdraw, purchase, sale, refund
-            amount REAL NOT NULL,
-            payment_method TEXT,
-            reference TEXT,
-            status TEXT DEFAULT 'pending',  # pending, completed, failed
-            description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
-    
-    # Notifications table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            message TEXT NOT NULL,
-            type TEXT,  # order, payment, system, promotion
-            related_id INTEGER,
-            read BOOLEAN DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
-    
-    # Ads table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            description TEXT,
-            image_url TEXT,
-            link TEXT,
-            target_audience TEXT,  # all, buyers, sellers
-            bg_color TEXT,
-            text_color TEXT,
-            btn_color TEXT,
-            start_date TIMESTAMP,
-            end_date TIMESTAMP,
-            budget REAL,
-            clicks INTEGER DEFAULT 0,
-            impressions INTEGER DEFAULT 0,
-            active BOOLEAN DEFAULT 1,
-            created_by INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (created_by) REFERENCES users (id)
-        )
-    ''')
-    
-    # Ad packages table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ad_packages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            description TEXT,
-            duration_days INTEGER,
-            price REAL NOT NULL,
-            features TEXT,
-            active BOOLEAN DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Reviews table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS reviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            target_type TEXT NOT NULL,  # product, seller, driver
-            target_id INTEGER NOT NULL,
-            rating INTEGER NOT NULL,
-            comment TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    ''')
-    
-    # System settings table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS settings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key TEXT UNIQUE NOT NULL,
-            value TEXT,
-            description TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Insert default settings
-    default_settings = [
-        ('app_name', 'تطبيق قات', 'اسم التطبيق'),
-        ('support_email', 'support@qat-app.com', 'بريد الدعم'),
-        ('support_phone', '771831482', 'هاتف الدعم'),
-        ('seller_commission', '5', 'نسبة عمولة البائعين (%)'),
-        ('delivery_fee', '15', 'رسوم التوصيل (ريال)'),
-        ('washing_fee', '100', 'رسوم غسل القات (ريال)'),
-        ('primary_color', '#2E7D32', 'اللون الرئيسي'),
-        ('text_color', '#333333', 'لون النص'),
-        ('bg_color', '#F5F7FA', 'لون الخلفية'),
-        ('currency', 'ريال', 'العملة'),
-        ('min_deposit', '10', 'أقل مبلغ للإيداع'),
-        ('max_deposit', '5000', 'أكثر مبلغ للإيداع')
-    ]
-    
-    for key, value, description in default_settings:
-        cursor.execute('INSERT OR IGNORE INTO settings (key, value, description) VALUES (?, ?, ?)', 
-                      (key, value, description))
-    
-    # Create default admin user if not exists
-    cursor.execute("SELECT COUNT(*) FROM users WHERE email = 'admin@qat.com'")
-    if cursor.fetchone()[0] == 0:
-        hashed_password = hashlib.sha256('admin123'.encode()).hexdigest()
-        cursor.execute('''
-            INSERT INTO users (name, email, phone, password, user_type, wallet_balance)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', ('مدير النظام', 'admin@qat.com', '771831482', hashed_password, 'admin', 0))
-    
-    # Add sample data
-    add_sample_data(cursor)
-    
-    conn.commit()
-    conn.close()
+    # Relationships
+    washers = relationship('Washer', backref='market', lazy=True)
+    products = relationship('Product', backref='market', lazy=True)
 
-def add_sample_data(cursor):
-    """Add sample data for testing"""
-    # Add sample seller
-    cursor.execute("SELECT COUNT(*) FROM users WHERE email = 'seller@qat.com'")
-    if cursor.fetchone()[0] == 0:
-        hashed_password = hashlib.sha256('seller123'.encode()).hexdigest()
-        cursor.execute('''
-            INSERT INTO users (name, email, phone, password, user_type, store_name)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', ('أحمد التاجر', 'seller@qat.com', '771234567', hashed_password, 'seller', 'متجر القات الفاخر'))
+class Washer(db.Model):
+    __tablename__ = 'washers'
     
-    # Add sample buyer
-    cursor.execute("SELECT COUNT(*) FROM users WHERE email = 'buyer@qat.com'")
-    if cursor.fetchone()[0] == 0:
-        hashed_password = hashlib.sha256('buyer123'.encode()).hexdigest()
-        cursor.execute('''
-            INSERT INTO users (name, email, phone, password, user_type, wallet_balance)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', ('محمد المشتري', 'buyer@qat.com', '771987654', hashed_password, 'buyer', 1000))
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    market_id = Column(Integer, ForeignKey('markets.id'), nullable=False)
+    phone = Column(String(20))
+    address = Column(Text)
+    washing_price = Column(Float, default=100.0)
+    status = Column(String(20), default='active')
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Driver(db.Model):
+    __tablename__ = 'drivers'
     
-    # Add sample market
-    cursor.execute("SELECT COUNT(*) FROM markets WHERE name = 'سوق القات المركزي'")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('''
-            INSERT INTO markets (name, city, address)
-            VALUES (?, ?, ?)
-        ''', ('سوق القات المركزي', 'صنعاء', 'شارع الزبيري، صنعاء'))
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    phone = Column(String(20))
+    vehicle_type = Column(String(50))
+    vehicle_number = Column(String(50))
+    status = Column(String(20), default='available')  # available, busy, offline
+    rating = Column(Float, default=5.0)
+    completed_orders = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Add sample products
-    cursor.execute("SELECT COUNT(*) FROM products")
-    if cursor.fetchone()[0] == 0:
-        # Get seller ID
-        cursor.execute("SELECT id FROM users WHERE email = 'seller@qat.com'")
-        seller = cursor.fetchone()
-        if seller:
-            seller_id = seller[0]
-            products = [
-                ('قات صعدي ممتاز', 'أجود أنواع القات الصعدي من أفضل المزارع', 60, 'صعدي', 50, True),
-                ('قات همداني فاخر', 'قات همداني طازج بنكهة مميزة', 55, 'همداني', 30, True),
-                ('قات أرحبي طازج', 'قات أرحبي طازج من مزارع أرحب', 45, 'أرحبي', 40, False),
-                ('قات حيوفي مميز', 'نوعية مميزة من القات الحيوفي', 50, 'حيوفي', 25, True),
-                ('قات نقفة طازج', 'قات نقفة طازج بسعر مناسب', 35, 'نقفة', 60, False),
-                ('قات روس فاخر', 'أجود أنواع القات الروس الفاخر', 65, 'روس', 20, True)
-            ]
-            
-            for name, desc, price, type, stock, washing in products:
-                cursor.execute('''
-                    INSERT INTO products (seller_id, name, description, price, type, stock, washing_available)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (seller_id, name, desc, price, type, stock, washing))
+    # Relationships
+    orders = relationship('Order', backref='driver', lazy=True)
 
-# Initialize database
-init_db()
+class Product(db.Model):
+    __tablename__ = 'products'
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text)
+    price = Column(Float, nullable=False)
+    category = Column(String(50))
+    seller_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    market_id = Column(Integer, ForeignKey('markets.id'))
+    stock = Column(Integer, default=0)
+    has_washing = Column(Boolean, default=True)
+    washing_price = Column(Float, default=100.0)
+    images = Column(Text)  # JSON array of image URLs
+    rating = Column(Float, default=5.0)
+    total_ratings = Column(Integer, default=0)
+    status = Column(String(20), default='active')
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    order_items = relationship('OrderItem', backref='product', lazy=True)
+    reviews = relationship('Review', backref='product', lazy=True)
 
-# Utility functions
-def get_db():
-    conn = sqlite3.connect(app.config['DATABASE'])
-    conn.row_factory = sqlite3.Row
-    return conn
+class Order(db.Model):
+    __tablename__ = 'orders'
+    
+    id = Column(Integer, primary_key=True)
+    order_code = Column(String(50), unique=True, nullable=False)
+    buyer_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    seller_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    driver_id = Column(Integer, ForeignKey('drivers.id'))
+    washer_id = Column(Integer, ForeignKey('washers.id'))
+    
+    subtotal = Column(Float, nullable=False)
+    washing_price = Column(Float, default=0.0)
+    delivery_fee = Column(Float, default=0.0)
+    total = Column(Float, nullable=False)
+    
+    delivery_address = Column(Text, nullable=False)
+    delivery_notes = Column(Text)
+    
+    payment_method = Column(String(50))
+    payment_status = Column(String(20), default='pending')  # pending, paid, failed
+    payment_reference = Column(String(100))
+    
+    order_status = Column(String(20), default='pending')  # pending, confirmed, washing, delivering, delivered, cancelled
+    
+    washing_required = Column(Boolean, default=False)
+    washing_status = Column(String(20), default='pending')  # pending, washing, completed
+    
+    estimated_delivery = Column(DateTime)
+    delivered_at = Column(DateTime)
+    
+    seller_notified = Column(Boolean, default=False)
+    washer_notified = Column(Boolean, default=False)
+    driver_notified = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    items = relationship('OrderItem', backref='order', lazy=True)
+    notifications = relationship('Notification', backref='order', lazy=True)
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+class OrderItem(db.Model):
+    __tablename__ = 'order_items'
+    
+    id = Column(Integer, primary_key=True)
+    order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
+    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    price = Column(Float, nullable=False)
+    washing = Column(Boolean, default=False)
+    washing_price = Column(Float, default=0.0)
 
-def verify_password(password, hashed):
-    return hash_password(password) == hashed
+class Review(db.Model):
+    __tablename__ = 'reviews'
+    
+    id = Column(Integer, primary_key=True)
+    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    order_id = Column(Integer, ForeignKey('orders.id'))
+    rating = Column(Integer, nullable=False)
+    comment = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-def generate_token(user_id, user_type):
-    payload = {
-        'user_id': user_id,
-        'user_type': user_type,
-        'exp': datetime.utcnow() + timedelta(days=7)
-    }
-    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+class Advertisement(db.Model):
+    __tablename__ = 'advertisements'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'))
+    package_id = Column(Integer, ForeignKey('advertisement_packages.id'))
+    title = Column(String(200), nullable=False)
+    content = Column(Text)
+    image_url = Column(String(500))
+    type = Column(String(50))  # home, banner, sidebar, popup
+    position = Column(Integer, default=0)
+    start_date = Column(DateTime)
+    end_date = Column(DateTime)
+    clicks = Column(Integer, default=0)
+    impressions = Column(Integer, default=0)
+    status = Column(String(20), default='active')
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-def verify_token(token):
-    try:
-        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-        return payload
-    except:
-        return None
+class AdvertisementPackage(db.Model):
+    __tablename__ = 'advertisement_packages'
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    price = Column(Float, nullable=False)
+    duration_days = Column(Integer, nullable=False)
+    features = Column(Text)  # JSON array of features
+    max_ads = Column(Integer, default=1)
+    status = Column(String(20), default='active')
+    created_at = Column(DateTime, default=datetime.utcnow)
 
+class Notification(db.Model):
+    __tablename__ = 'notifications'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    order_id = Column(Integer, ForeignKey('orders.id'))
+    title = Column(String(200), nullable=False)
+    message = Column(Text, nullable=False)
+    type = Column(String(50))  # order, payment, system, promotion
+    read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class WalletTransaction(db.Model):
+    __tablename__ = 'wallet_transactions'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    type = Column(String(20), nullable=False)  # deposit, withdrawal, purchase, sale, refund
+    amount = Column(Float, nullable=False)
+    balance_before = Column(Float, nullable=False)
+    balance_after = Column(Float, nullable=False)
+    reference = Column(String(100))
+    description = Column(Text)
+    status = Column(String(20), default='completed')
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Withdrawal(db.Model):
+    __tablename__ = 'withdrawals'
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    amount = Column(Float, nullable=False)
+    wallet_type = Column(String(50))  # jib, jawaly, mobile_money, etc.
+    wallet_number = Column(String(50))
+    wallet_name = Column(String(100))
+    status = Column(String(20), default='pending')  # pending, approved, rejected, completed
+    admin_notes = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime)
+
+class GiftCode(db.Model):
+    __tablename__ = 'gift_codes'
+    
+    id = Column(Integer, primary_key=True)
+    code = Column(String(50), unique=True, nullable=False)
+    amount = Column(Float, nullable=False)
+    created_by = Column(Integer, ForeignKey('users.id'))
+    used_by = Column(Integer, ForeignKey('users.id'))
+    used_at = Column(DateTime)
+    expiry_date = Column(DateTime)
+    status = Column(String(20), default='active')  # active, used, expired
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class SystemSetting(db.Model):
+    __tablename__ = 'system_settings'
+    
+    id = Column(Integer, primary_key=True)
+    key = Column(String(100), unique=True, nullable=False)
+    value = Column(Text)
+    description = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+# Auth decorator
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = None
         
         if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            if auth_header.startswith('Bearer '):
-                token = auth_header.split(' ')[1]
+            token = request.headers['Authorization'].split(" ")[1]
         
         if not token:
-            return jsonify({'success': False, 'message': 'Token is missing!'}), 401
+            return jsonify({'message': 'Token is missing!'}), 401
         
         try:
-            payload = verify_token(token)
-            if not payload:
-                return jsonify({'success': False, 'message': 'Invalid token!'}), 401
+            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+            current_user = User.query.get(data['user_id'])
         except:
-            return jsonify({'success': False, 'message': 'Invalid token!'}), 401
+            return jsonify({'message': 'Token is invalid!'}), 401
         
-        request.user_id = payload['user_id']
-        request.user_type = payload['user_type']
-        
-        return f(*args, **kwargs)
+        return f(current_user, *args, **kwargs)
+    
     return decorated
 
 def admin_required(f):
     @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        
-        if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            if auth_header.startswith('Bearer '):
-                token = auth_header.split(' ')[1]
-        
-        if not token:
-            return jsonify({'success': False, 'message': 'Token is missing!'}), 401
-        
-        try:
-            payload = verify_token(token)
-            if not payload or payload['user_type'] != 'admin':
-                return jsonify({'success': False, 'message': 'Admin access required!'}), 403
-        except:
-            return jsonify({'success': False, 'message': 'Invalid token!'}), 401
-        
-        request.user_id = payload['user_id']
-        request.user_type = payload['user_type']
-        
-        return f(*args, **kwargs)
+    def decorated(current_user, *args, **kwargs):
+        if current_user.user_type != 'admin':
+            return jsonify({'message': 'Admin access required!'}), 403
+        return f(current_user, *args, **kwargs)
     return decorated
 
-def generate_sales_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+def seller_required(f):
+    @wraps(f)
+    def decorated(current_user, *args, **kwargs):
+        if current_user.user_type != 'seller':
+            return jsonify({'message': 'Seller access required!'}), 403
+        return f(current_user, *args, **kwargs)
+    return decorated
 
-def generate_order_number():
-    return f'ORD{datetime.now().strftime("%Y%m%d")}{random.randint(1000, 9999)}'
-
-def create_notification(user_id, title, message, type='system', related_id=None):
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO notifications (user_id, title, message, type, related_id)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, title, message, type, related_id))
-    conn.commit()
-    conn.close()
-
-# Serve HTML files
+# Routes
 @app.route('/')
 def index():
-    return send_from_directory('.', 'index.html')
+    return jsonify({'message': 'Qat App API', 'version': '1.0.0'})
 
-@app.route('/<path:path>')
-def serve_file(path):
-    if os.path.exists(path):
-        return send_from_directory('.', path)
-    else:
-        return send_from_directory('.', 'index.html')
-
-# API Routes
-
-# Authentication
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    user_type = data.get('user_type', 'buyer')
-    
-    if not email or not password:
-        return jsonify({'success': False, 'message': 'البريد الإلكتروني وكلمة المرور مطلوبان'})
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE email = ? AND user_type = ?', (email, user_type))
-    user = cursor.fetchone()
-    conn.close()
-    
-    if user and verify_password(password, user['password']):
-        if not user['active']:
-            return jsonify({'success': False, 'message': 'الحساب موقوف'})
-        
-        token = generate_token(user['id'], user['user_type'])
-        user_data = {
-            'id': user['id'],
-            'name': user['name'],
-            'email': user['email'],
-            'phone': user['phone'],
-            'type': user['user_type'],
-            'store_name': user['store_name'],
-            'wallet_balance': user['wallet_balance']
-        }
-        
-        # Create welcome notification
-        create_notification(user['id'], 'مرحباً بك!', 'تم تسجيل دخولك بنجاح إلى تطبيق قات')
-        
-        return jsonify({
-            'success': True,
-            'token': token,
-            'user': user_data,
-            'message': 'تم تسجيل الدخول بنجاح'
-        })
-    
-    return jsonify({'success': False, 'message': 'البريد الإلكتروني أو كلمة المرور غير صحيحة'})
-
-@app.route('/api/register', methods=['POST'])
+# Auth routes
+@app.route('/api/auth/register', methods=['POST'])
 def register():
-    data = request.get_json()
+    data = request.json
     
-    required_fields = ['name', 'email', 'phone', 'password', 'confirm_password', 'user_type']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
+    # Check if user exists
+    if User.query.filter_by(email=data['email']).first():
+        return jsonify({'message': 'User already exists!'}), 400
     
-    if data['password'] != data['confirm_password']:
-        return jsonify({'success': False, 'message': 'كلمات المرور غير متطابقة'})
+    # Create new user
+    user = User(
+        name=data['name'],
+        email=data['email'],
+        phone=data['phone'],
+        user_type=data.get('user_type', 'buyer')
+    )
     
-    conn = get_db()
-    cursor = conn.cursor()
+    if 'store_name' in data:
+        user.store_name = data['store_name']
     
-    # Check if email already exists
-    cursor.execute('SELECT id FROM users WHERE email = ?', (data['email'],))
-    if cursor.fetchone():
-        conn.close()
-        return jsonify({'success': False, 'message': 'البريد الإلكتروني مسجل مسبقاً'})
+    if 'vehicle_type' in data:
+        user.vehicle_type = data['vehicle_type']
     
-    # Hash password
-    hashed_password = hash_password(data['password'])
+    user.set_password(data['password'])
     
-    # Insert new user
-    cursor.execute('''
-        INSERT INTO users (name, email, phone, password, user_type, store_name, store_description)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        data['name'],
-        data['email'],
-        data['phone'],
-        hashed_password,
-        data['user_type'],
-        data.get('store_name', ''),
-        data.get('store_description', '')
-    ))
+    db.session.add(user)
+    db.session.commit()
     
-    user_id = cursor.lastrowid
-    
-    # Create driver record if user is a driver
-    if data['user_type'] == 'driver':
-        cursor.execute('''
-            INSERT INTO drivers (user_id, name, phone)
-            VALUES (?, ?, ?)
-        ''', (user_id, data['name'], data['phone']))
-    
-    conn.commit()
-    conn.close()
-    
-    # Create welcome notification
-    create_notification(user_id, 'مرحباً بك في تطبيق قات!', 'تم إنشاء حسابك بنجاح')
+    # Create token
+    token = jwt.encode({
+        'user_id': user.id,
+        'exp': datetime.utcnow() + timedelta(days=30)
+    }, app.config['SECRET_KEY'])
     
     return jsonify({
-        'success': True,
-        'message': 'تم إنشاء الحساب بنجاح'
+        'message': 'User created successfully!',
+        'token': token,
+        'user': user.to_dict()
+    }), 201
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    data = request.json
+    
+    user = User.query.filter_by(email=data['email']).first()
+    
+    if not user or not user.check_password(data['password']):
+        return jsonify({'message': 'Invalid credentials!'}), 401
+    
+    # Create token
+    token = jwt.encode({
+        'user_id': user.id,
+        'exp': datetime.utcnow() + timedelta(days=30)
+    }, app.config['SECRET_KEY'])
+    
+    return jsonify({
+        'message': 'Login successful!',
+        'token': token,
+        'user': user.to_dict()
     })
 
-# Products
+# Products routes
 @app.route('/api/products', methods=['GET'])
 def get_products():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Get query parameters
-    seller_id = request.args.get('seller_id')
     category = request.args.get('category')
-    search = request.args.get('search')
+    seller_id = request.args.get('seller_id')
+    market_id = request.args.get('market_id')
     
-    query = '''
-        SELECT p.*, u.name as seller_name, u.store_name
-        FROM products p
-        JOIN users u ON p.seller_id = u.id
-        WHERE p.active = 1 AND u.active = 1
-    '''
-    params = []
-    
-    if seller_id:
-        query += ' AND p.seller_id = ?'
-        params.append(seller_id)
+    query = Product.query.filter_by(status='active')
     
     if category:
-        query += ' AND p.type = ?'
-        params.append(category)
+        query = query.filter_by(category=category)
     
-    if search:
-        query += ' AND (p.name LIKE ? OR p.description LIKE ?)'
-        params.extend([f'%{search}%', f'%{search}%'])
+    if seller_id:
+        query = query.filter_by(seller_id=seller_id)
     
-    query += ' ORDER BY p.created_at DESC'
+    if market_id:
+        query = query.filter_by(market_id=market_id)
     
-    cursor.execute(query, params)
-    products = cursor.fetchall()
+    products = query.all()
     
-    conn.close()
-    
-    return jsonify([dict(product) for product in products])
+    return jsonify([{
+        'id': p.id,
+        'name': p.name,
+        'description': p.description,
+        'price': p.price,
+        'category': p.category,
+        'seller': p.seller.to_dict(),
+        'market': p.market.to_dict() if p.market else None,
+        'stock': p.stock,
+        'has_washing': p.has_washing,
+        'washing_price': p.washing_price,
+        'rating': p.rating,
+        'total_ratings': p.total_ratings,
+        'images': json.loads(p.images) if p.images else []
+    } for p in products])
 
 @app.route('/api/products', methods=['POST'])
 @token_required
-def create_product():
-    if request.user_type != 'seller':
-        return jsonify({'success': False, 'message': 'غير مصرح للبائعين فقط'})
+@seller_required
+def create_product(current_user):
+    data = request.json
     
-    data = request.get_json()
-    
-    required_fields = ['name', 'price', 'stock']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO products (seller_id, name, description, price, type, stock, washing_available)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        request.user_id,
-        data['name'],
-        data.get('description', ''),
-        data['price'],
-        data.get('type', ''),
-        data['stock'],
-        data.get('washing_available', False)
-    ))
-    
-    product_id = cursor.lastrowid
-    
-    # Create notification for seller
-    create_notification(
-        request.user_id,
-        'تم إضافة منتج جديد',
-        f'تم إضافة منتج "{data["name"]}" بنجاح'
+    product = Product(
+        name=data['name'],
+        description=data.get('description', ''),
+        price=data['price'],
+        category=data.get('category', 'general'),
+        seller_id=current_user.id,
+        market_id=data.get('market_id'),
+        stock=data.get('stock', 0),
+        has_washing=data.get('has_washing', True),
+        washing_price=data.get('washing_price', 100.0),
+        images=json.dumps(data.get('images', []))
     )
     
-    conn.commit()
-    conn.close()
+    db.session.add(product)
+    db.session.commit()
     
     return jsonify({
-        'success': True,
-        'message': 'تم إضافة المنتج بنجاح',
-        'product_id': product_id
-    })
+        'message': 'Product created successfully!',
+        'product': {
+            'id': product.id,
+            'name': product.name,
+            'price': product.price
+        }
+    }), 201
 
-# Orders
-@app.route('/api/orders/create', methods=['POST'])
+# Orders routes
+@app.route('/api/orders', methods=['POST'])
 @token_required
-def create_order():
-    data = request.get_json()
+def create_order(current_user):
+    data = request.json
     
-    if not data.get('items') or len(data['items']) == 0:
-        return jsonify({'success': False, 'message': 'السلة فارغة'})
+    # Check cart items
+    items = data['items']
+    if not items:
+        return jsonify({'message': 'Cart is empty!'}), 400
     
-    conn = get_db()
-    cursor = conn.cursor()
+    # Calculate totals
+    subtotal = sum(item['price'] * item['quantity'] for item in items)
+    washing_price = sum(100 for item in items if item.get('washing', False))
+    total = subtotal + washing_price + data.get('delivery_fee', 0)
     
-    # Get buyer wallet balance
-    cursor.execute('SELECT wallet_balance FROM users WHERE id = ?', (request.user_id,))
-    buyer = cursor.fetchone()
+    # Check balance if paying with balance
+    if data.get('payment_method') == 'balance':
+        if current_user.balance < total:
+            return jsonify({'message': 'Insufficient balance!'}), 400
     
-    total_amount = data.get('total', 0)
-    washing_total = data.get('washing_total', 0)
-    
-    if buyer['wallet_balance'] < total_amount:
-        return jsonify({'success': False, 'message': 'رصيد المحفظة غير كافي'})
-    
-    # Get seller ID from first item
-    first_item = data['items'][0]
-    product_id = first_item['product_id']
-    
-    cursor.execute('SELECT seller_id FROM products WHERE id = ?', (product_id,))
-    product = cursor.fetchone()
-    seller_id = product['seller_id']
-    
-    # Generate order number and sales code
-    order_number = generate_order_number()
-    sales_code = generate_sales_code()
-    
-    # Get market and washing station for seller
-    cursor.execute('''
-        SELECT m.id as market_id, ws.id as washing_station_id
-        FROM users u
-        LEFT JOIN markets m ON 1=1
-        LEFT JOIN washing_stations ws ON ws.market_id = m.id
-        WHERE u.id = ?
-        LIMIT 1
-    ''', (seller_id,))
-    
-    location = cursor.fetchone()
-    market_id = location['market_id'] if location else None
-    washing_station_id = location['washing_station_id'] if location else None
-    
-    # Get available driver
-    cursor.execute('SELECT id FROM drivers WHERE available = 1 AND active = 1 LIMIT 1')
-    driver = cursor.fetchone()
-    driver_id = driver['id'] if driver else None
+    # Get seller from first product
+    first_product = Product.query.get(items[0]['product_id'])
+    if not first_product:
+        return jsonify({'message': 'Product not found!'}), 404
     
     # Create order
-    cursor.execute('''
-        INSERT INTO orders (
-            order_number, buyer_id, seller_id, market_id, washing_station_id, driver_id,
-            total_amount, washing_amount, delivery_fee, sales_code, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        order_number, request.user_id, seller_id, market_id, washing_station_id, driver_id,
-        total_amount, washing_total, 15, sales_code, 'confirmed'
-    ))
-    
-    order_id = cursor.lastrowid
-    
-    # Add order items
-    for item in data['items']:
-        cursor.execute('''
-            INSERT INTO order_items (order_id, product_id, quantity, unit_price, washing, washing_price)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (
-            order_id,
-            item['product_id'],
-            item['quantity'],
-            item['price'],
-            item.get('washing', False),
-            100 if item.get('washing', False) else 0
-        ))
-        
-        # Update product stock
-        cursor.execute('UPDATE products SET stock = stock - ? WHERE id = ?', 
-                      (item['quantity'], item['product_id']))
-    
-    # Deduct amount from buyer's wallet
-    cursor.execute('UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ?', 
-                  (total_amount, request.user_id))
-    
-    # Add to seller's wallet
-    seller_earnings = total_amount - 15  # Minus delivery fee
-    cursor.execute('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?', 
-                  (seller_earnings, seller_id))
-    
-    # Add transaction for buyer
-    cursor.execute('''
-        INSERT INTO transactions (user_id, type, amount, status, description)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (request.user_id, 'purchase', total_amount, 'completed', f'طلب #{order_number}'))
-    
-    # Add transaction for seller
-    cursor.execute('''
-        INSERT INTO transactions (user_id, type, amount, status, description)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (seller_id, 'sale', seller_earnings, 'completed', f'طلب #{order_number}'))
-    
-    # Notifications
-    # Notify buyer
-    create_notification(
-        request.user_id,
-        'تم إنشاء طلب جديد',
-        f'تم إنشاء طلبك رقم #{order_number} بنجاح',
-        'order',
-        order_id
+    order = Order(
+        order_code=f"QAT-{datetime.now().strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}",
+        buyer_id=current_user.id,
+        seller_id=first_product.seller_id,
+        subtotal=subtotal,
+        washing_price=washing_price,
+        delivery_fee=data.get('delivery_fee', 0),
+        total=total,
+        delivery_address=data['delivery_address'],
+        payment_method=data.get('payment_method'),
+        washing_required=washing_price > 0,
+        estimated_delivery=datetime.utcnow() + timedelta(hours=1)
     )
     
-    # Notify seller
-    create_notification(
-        seller_id,
-        'طلب جديد',
-        f'لديك طلب جديد رقم #{order_number}',
-        'order',
-        order_id
-    )
+    db.session.add(order)
+    db.session.flush()  # Get order ID
     
-    # Notify washing station if applicable
-    if washing_station_id and washing_total > 0:
-        cursor.execute('SELECT owner_name, phone FROM washing_stations WHERE id = ?', (washing_station_id,))
-        washing_station = cursor.fetchone()
-        if washing_station:
-            create_notification(
-                seller_id,
-                'طلب غسيل',
-                f'طلب غسيل جديد للطلب #{order_number}',
-                'order',
-                order_id
-            )
-    
-    # Notify driver
-    if driver_id:
-        create_notification(
-            driver_id,
-            'طلب توصيل جديد',
-            f'طلب توصيل جديد رقم #{order_number}',
-            'order',
-            order_id
+    # Create order items
+    for item_data in items:
+        item = OrderItem(
+            order_id=order.id,
+            product_id=item_data['product_id'],
+            quantity=item_data['quantity'],
+            price=item_data['price'],
+            washing=item_data.get('washing', False),
+            washing_price=100 if item_data.get('washing', False) else 0
         )
+        db.session.add(item)
     
-    conn.commit()
-    conn.close()
+    # Process payment
+    if data.get('payment_method') == 'balance':
+        current_user.balance -= total
+        order.payment_status = 'paid'
+        
+        # Add to seller's balance
+        seller = User.query.get(first_product.seller_id)
+        seller.balance += total
+    
+    # Create notifications
+    notifications = []
+    
+    # Notification to seller
+    seller_notification = Notification(
+        user_id=first_product.seller_id,
+        order_id=order.id,
+        title='طلب جديد',
+        message=f'لديك طلب جديد #{order.order_code}',
+        type='order'
+    )
+    notifications.append(seller_notification)
+    
+    # Notification to washer if washing required
+    if washing_price > 0:
+        washer = Washer.query.filter_by(market_id=first_product.market_id, status='active').first()
+        if washer:
+            order.washer_id = washer.id
+            washer_notification = Notification(
+                user_id=washer.id,
+                order_id=order.id,
+                title='طلب غسيل جديد',
+                message=f'طلب غسيل جديد #{order.order_code}',
+                type='order'
+            )
+            notifications.append(washer_notification)
+    
+    # Notification to driver
+    driver = Driver.query.filter_by(status='available').first()
+    if driver:
+        order.driver_id = driver.id
+        driver_notification = Notification(
+            user_id=driver.id,
+            order_id=order.id,
+            title='مهمة توصيل جديدة',
+            message=f'مهمة توصيل جديدة #{order.order_code}',
+            type='order'
+        )
+        notifications.append(driver_notification)
+    
+    # Add all notifications
+    for notification in notifications:
+        db.session.add(notification)
+    
+    # Create wallet transaction
+    transaction = WalletTransaction(
+        user_id=current_user.id,
+        type='purchase',
+        amount=total,
+        balance_before=current_user.balance + total,
+        balance_after=current_user.balance,
+        reference=order.order_code,
+        description=f'شراء منتجات - طلب #{order.order_code}'
+    )
+    db.session.add(transaction)
+    
+    db.session.commit()
     
     return jsonify({
-        'success': True,
-        'message': 'تم إنشاء الطلب بنجاح',
+        'message': 'Order created successfully!',
         'order': {
-            'id': order_id,
-            'order_number': order_number,
-            'sales_code': sales_code,
-            'total': total_amount
+            'id': order.id,
+            'order_code': order.order_code,
+            'total': order.total,
+            'estimated_delivery': order.estimated_delivery.isoformat()
         }
-    })
+    }), 201
 
-@app.route('/api/orders/my', methods=['GET'])
+# Wallet routes
+@app.route('/api/wallet/balance', methods=['GET'])
 @token_required
-def get_my_orders():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    user_type = request.user_type
-    
-    if user_type == 'buyer':
-        cursor.execute('''
-            SELECT o.*, u.name as seller_name
-            FROM orders o
-            JOIN users u ON o.seller_id = u.id
-            WHERE o.buyer_id = ?
-            ORDER BY o.created_at DESC
-        ''', (request.user_id,))
-    elif user_type == 'seller':
-        cursor.execute('''
-            SELECT o.*, u.name as buyer_name
-            FROM orders o
-            JOIN users u ON o.buyer_id = u.id
-            WHERE o.seller_id = ?
-            ORDER BY o.created_at DESC
-        ''', (request.user_id,))
-    else:
-        cursor.execute('SELECT * FROM orders ORDER BY created_at DESC')
-    
-    orders = cursor.fetchall()
-    conn.close()
-    
-    return jsonify([dict(order) for order in orders])
+def get_balance(current_user):
+    return jsonify({'balance': current_user.balance})
 
-# Wallet
-@app.route('/api/wallet', methods=['GET'])
+@app.route('/api/wallet/deposit', methods=['POST'])
 @token_required
-def get_wallet():
-    conn = get_db()
-    cursor = conn.cursor()
+def deposit_balance(current_user):
+    data = request.json
     
-    cursor.execute('SELECT wallet_balance FROM users WHERE id = ?', (request.user_id,))
-    user = cursor.fetchone()
+    amount = data['amount']
+    method = data['method']
+    reference = data.get('reference')
     
-    conn.close()
+    # Update balance
+    current_user.balance += amount
     
-    return jsonify({
-        'success': True,
-        'balance': user['wallet_balance'] if user else 0
-    })
-
-@app.route('/api/wallet/charge', methods=['POST'])
-@token_required
-def charge_wallet():
-    data = request.get_json()
-    amount = data.get('amount')
-    method = data.get('method')
-    
-    if not amount or amount < 10:
-        return jsonify({'success': False, 'message': 'المبلغ يجب أن يكون 10 ريال على الأقل'})
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Add transaction
-    cursor.execute('''
-        INSERT INTO transactions (user_id, type, amount, payment_method, status, description)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (request.user_id, 'deposit', amount, method, 'pending', 'شحن رصيد'))
-    
-    transaction_id = cursor.lastrowid
-    
-    # Simulate successful payment
-    cursor.execute('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?', 
-                  (amount, request.user_id))
-    
-    cursor.execute('UPDATE transactions SET status = ? WHERE id = ?', 
-                  ('completed', transaction_id))
+    # Create transaction
+    transaction = WalletTransaction(
+        user_id=current_user.id,
+        type='deposit',
+        amount=amount,
+        balance_before=current_user.balance - amount,
+        balance_after=current_user.balance,
+        reference=reference,
+        description=f'شحن رصيد عبر {method}'
+    )
+    db.session.add(transaction)
     
     # Create notification
-    create_notification(
-        request.user_id,
-        'شحن رصيد',
-        f'تم شحن مبلغ {amount} ريال إلى محفظتك',
-        'payment',
-        transaction_id
+    notification = Notification(
+        user_id=current_user.id,
+        title='شحن ناجح',
+        message=f'تم شحن {amount} ريال إلى رصيدك',
+        type='payment'
     )
+    db.session.add(notification)
     
-    conn.commit()
-    conn.close()
-    
-    return jsonify({
-        'success': True,
-        'message': f'تم شحن {amount} ريال بنجاح'
-    })
-
-@app.route('/api/wallet/withdraw', methods=['POST'])
-@token_required
-def withdraw_wallet():
-    data = request.get_json()
-    amount = data.get('amount')
-    wallet_type = data.get('wallet_type')
-    wallet_number = data.get('wallet_number')
-    full_name = data.get('full_name')
-    
-    if not all([amount, wallet_type, wallet_number, full_name]):
-        return jsonify({'success': False, 'message': 'جميع الحقول مطلوبة'})
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Check balance
-    cursor.execute('SELECT wallet_balance FROM users WHERE id = ?', (request.user_id,))
-    user = cursor.fetchone()
-    
-    if user['wallet_balance'] < amount:
-        return jsonify({'success': False, 'message': 'الرصيد غير كافي'})
-    
-    # Add withdrawal transaction
-    cursor.execute('''
-        INSERT INTO transactions (user_id, type, amount, payment_method, status, description)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (request.user_id, 'withdraw', amount, wallet_type, 'pending', f'سحب إلى {wallet_type}'))
-    
-    transaction_id = cursor.lastrowid
-    
-    # Deduct from balance
-    cursor.execute('UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ?', 
-                  (amount, request.user_id))
-    
-    cursor.execute('UPDATE transactions SET status = ? WHERE id = ?', 
-                  ('processing', transaction_id))
-    
-    # Notify admin
-    cursor.execute('SELECT id FROM users WHERE user_type = ? LIMIT 1', ('admin',))
-    admin = cursor.fetchone()
-    if admin:
-        create_notification(
-            admin['id'],
-            'طلب سحب جديد',
-            f'طلب سحب جديد بمبلغ {amount} ريال من المستخدم #{request.user_id}',
-            'payment',
-            transaction_id
-        )
-    
-    conn.commit()
-    conn.close()
+    db.session.commit()
     
     return jsonify({
-        'success': True,
-        'message': 'تم إرسال طلب السحب، سيتم المعالجة خلال 24 ساعة'
+        'message': 'Balance deposited successfully!',
+        'new_balance': current_user.balance
     })
 
-@app.route('/api/wallet/transactions', methods=['GET'])
-@token_required
-def get_transactions():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT * FROM transactions 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC
-        LIMIT 50
-    ''', (request.user_id,))
-    
-    transactions = cursor.fetchall()
-    conn.close()
-    
-    return jsonify([dict(trans) for trans in transactions])
-
-# Notifications
-@app.route('/api/notifications', methods=['GET'])
-@token_required
-def get_notifications():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT * FROM notifications 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC
-        LIMIT 50
-    ''', (request.user_id,))
-    
-    notifications = cursor.fetchall()
-    conn.close()
-    
-    return jsonify([dict(notif) for notif in notifications])
-
-@app.route('/api/notifications/<int:notification_id>/read', methods=['POST'])
-@token_required
-def mark_notification_read(notification_id):
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        UPDATE notifications SET read = 1 
-        WHERE id = ? AND user_id = ?
-    ''', (notification_id, request.user_id))
-    
-    conn.commit()
-    conn.close()
-    
-    return jsonify({'success': True})
-
-# Admin Routes
-
-# Markets Management
+# Admin routes
 @app.route('/api/admin/markets', methods=['GET'])
+@token_required
 @admin_required
-def get_markets():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT m.*, 
-               (SELECT COUNT(*) FROM washing_stations ws WHERE ws.market_id = m.id) as washing_stations_count
-        FROM markets m
-        ORDER BY m.created_at DESC
-    ''')
-    
-    markets = cursor.fetchall()
-    conn.close()
-    
-    return jsonify([dict(market) for market in markets])
+def get_markets_admin(current_user):
+    markets = Market.query.all()
+    return jsonify([{
+        'id': m.id,
+        'name': m.name,
+        'location': m.location,
+        'address': m.address,
+        'phone': m.phone,
+        'manager_name': m.manager_name,
+        'status': m.status,
+        'washers_count': len(m.washers),
+        'products_count': len(m.products),
+        'created_at': m.created_at.isoformat()
+    } for m in markets])
 
 @app.route('/api/admin/markets', methods=['POST'])
+@token_required
 @admin_required
-def create_market():
-    data = request.get_json()
+def create_market(current_user):
+    data = request.json
     
-    required_fields = ['name', 'city']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
+    market = Market(
+        name=data['name'],
+        location=data.get('location'),
+        address=data.get('address'),
+        phone=data.get('phone'),
+        manager_name=data.get('manager_name')
+    )
     
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO markets (name, city, address, latitude, longitude, active)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (
-        data['name'],
-        data['city'],
-        data.get('address', ''),
-        data.get('latitude'),
-        data.get('longitude'),
-        data.get('active', True)
-    ))
-    
-    market_id = cursor.lastrowid
-    
-    conn.commit()
-    conn.close()
+    db.session.add(market)
+    db.session.commit()
     
     return jsonify({
-        'success': True,
-        'message': 'تم إنشاء السوق بنجاح',
-        'market_id': market_id
-    })
+        'message': 'Market created successfully!',
+        'market': {
+            'id': market.id,
+            'name': market.name
+        }
+    }), 201
 
-# Washing Stations Management
-@app.route('/api/admin/washing-stations', methods=['GET'])
+@app.route('/api/admin/washers', methods=['POST'])
+@token_required
 @admin_required
-def get_washing_stations():
-    conn = get_db()
-    cursor = conn.cursor()
+def create_washer(current_user):
+    data = request.json
     
-    market_id = request.args.get('market_id')
+    washer = Washer(
+        name=data['name'],
+        market_id=data['market_id'],
+        phone=data.get('phone'),
+        address=data.get('address'),
+        washing_price=data.get('washing_price', 100.0)
+    )
     
-    query = '''
-        SELECT ws.*, m.name as market_name
-        FROM washing_stations ws
-        LEFT JOIN markets m ON ws.market_id = m.id
-        WHERE 1=1
-    '''
-    params = []
-    
-    if market_id:
-        query += ' AND ws.market_id = ?'
-        params.append(market_id)
-    
-    query += ' ORDER BY ws.name'
-    
-    cursor.execute(query, params)
-    stations = cursor.fetchall()
-    
-    conn.close()
-    
-    return jsonify([dict(station) for station in stations])
-
-@app.route('/api/admin/washing-stations', methods=['POST'])
-@admin_required
-def create_washing_station():
-    data = request.get_json()
-    
-    required_fields = ['name', 'market_id']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO washing_stations (market_id, name, owner_name, phone, address, capacity, active)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        data['market_id'],
-        data['name'],
-        data.get('owner_name', ''),
-        data.get('phone', ''),
-        data.get('address', ''),
-        data.get('capacity', 10),
-        data.get('active', True)
-    ))
-    
-    station_id = cursor.lastrowid
-    
-    conn.commit()
-    conn.close()
+    db.session.add(washer)
+    db.session.commit()
     
     return jsonify({
-        'success': True,
-        'message': 'تم إنشاء مغسلة القات بنجاح',
-        'station_id': station_id
-    })
-
-# Drivers Management
-@app.route('/api/admin/drivers', methods=['GET'])
-@admin_required
-def get_drivers():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT d.*, u.email, u.phone as user_phone
-        FROM drivers d
-        LEFT JOIN users u ON d.user_id = u.id
-        ORDER BY d.name
-    ''')
-    
-    drivers = cursor.fetchall()
-    conn.close()
-    
-    return jsonify([dict(driver) for driver in drivers])
+        'message': 'Washer created successfully!',
+        'washer': {
+            'id': washer.id,
+            'name': washer.name
+        }
+    }), 201
 
 @app.route('/api/admin/drivers', methods=['POST'])
+@token_required
 @admin_required
-def create_driver():
-    data = request.get_json()
+def create_driver(current_user):
+    data = request.json
     
-    required_fields = ['name', 'phone']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
+    driver = Driver(
+        name=data['name'],
+        phone=data.get('phone'),
+        vehicle_type=data.get('vehicle_type'),
+        vehicle_number=data.get('vehicle_number')
+    )
     
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # First create user account
-    hashed_password = hash_password('driver123')  # Default password
-    
-    cursor.execute('''
-        INSERT INTO users (name, email, phone, password, user_type)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (
-        data['name'],
-        data.get('email', f"{data['phone']}@qat.com"),
-        data['phone'],
-        hashed_password,
-        'driver'
-    ))
-    
-    user_id = cursor.lastrowid
-    
-    # Then create driver record
-    cursor.execute('''
-        INSERT INTO drivers (user_id, name, phone, vehicle_type, vehicle_number)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (
-        user_id,
-        data['name'],
-        data['phone'],
-        data.get('vehicle_type', 'دراجة نارية'),
-        data.get('vehicle_number', '')
-    ))
-    
-    driver_id = cursor.lastrowid
-    
-    conn.commit()
-    conn.close()
+    db.session.add(driver)
+    db.session.commit()
     
     return jsonify({
-        'success': True,
-        'message': 'تم إنشاء مندوب التوصيل بنجاح',
-        'driver_id': driver_id
-    })
+        'message': 'Driver created successfully!',
+        'driver': {
+            'id': driver.id,
+            'name': driver.name
+        }
+    }), 201
 
-# Users Management
-@app.route('/api/admin/users', methods=['GET'])
+# Backup routes
+@app.route('/api/admin/backup', methods=['GET'])
+@token_required
 @admin_required
-def get_users():
-    conn = get_db()
-    cursor = conn.cursor()
+def export_backup(current_user):
+    # Export all data to Excel
+    output = BytesIO()
     
-    user_type = request.args.get('type')
-    search = request.args.get('search')
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Export users
+        users = User.query.all()
+        users_data = [u.to_dict() for u in users]
+        pd.DataFrame(users_data).to_excel(writer, sheet_name='Users', index=False)
+        
+        # Export products
+        products = Product.query.all()
+        products_data = [{
+            'id': p.id,
+            'name': p.name,
+            'price': p.price,
+            'category': p.category,
+            'seller': p.seller.name,
+            'stock': p.stock
+        } for p in products]
+        pd.DataFrame(products_data).to_excel(writer, sheet_name='Products', index=False)
+        
+        # Export orders
+        orders = Order.query.all()
+        orders_data = [{
+            'id': o.id,
+            'order_code': o.order_code,
+            'buyer': o.buyer.name,
+            'seller': o.seller.name,
+            'total': o.total,
+            'status': o.order_status,
+            'created_at': o.created_at.isoformat()
+        } for o in orders]
+        pd.DataFrame(orders_data).to_excel(writer, sheet_name='Orders', index=False)
+        
+        # Export markets
+        markets = Market.query.all()
+        markets_data = [{
+            'id': m.id,
+            'name': m.name,
+            'location': m.location,
+            'address': m.address
+        } for m in markets]
+        pd.DataFrame(markets_data).to_excel(writer, sheet_name='Markets', index=False)
     
-    query = 'SELECT * FROM users WHERE 1=1'
-    params = []
+    output.seek(0)
     
-    if user_type:
-        query += ' AND user_type = ?'
-        params.append(user_type)
-    
-    if search:
-        query += ' AND (name LIKE ? OR email LIKE ? OR phone LIKE ?)'
-        params.extend([f'%{search}%', f'%{search}%', f'%{search}%'])
-    
-    query += ' ORDER BY created_at DESC'
-    
-    cursor.execute(query, params)
-    users = cursor.fetchall()
-    
-    conn.close()
-    
-    return jsonify([dict(user) for user in users])
+    return send_file(
+        output,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=f'qat-backup-{datetime.now().strftime("%Y-%m-%d")}.xlsx'
+    )
 
-# Export to Excel
-@app.route('/api/admin/export/users', methods=['GET'])
-@admin_required
-def export_users():
-    conn = get_db()
-    
-    # Get users data
-    users_df = pd.read_sql_query('SELECT * FROM users', conn)
-    
-    # Create Excel file
-    filename = f'users_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
-    filepath = os.path.join(app.config['BACKUP_FOLDER'], filename)
-    
-    # Ensure backup folder exists
-    os.makedirs(app.config['BACKUP_FOLDER'], exist_ok=True)
-    
-    # Save to Excel
-    users_df.to_excel(filepath, index=False)
-    
-    conn.close()
-    
-    return send_file(filepath, as_attachment=True)
-
-# Backup Management
-@app.route('/api/admin/backup', methods=['POST'])
-@admin_required
-def create_backup():
-    data = request.get_json()
-    table = data.get('table', 'all')
-    
-    conn = get_db()
-    
-    # Get list of tables
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    tables = [row[0] for row in cursor.fetchall()]
-    
-    backup_data = {}
-    
-    if table == 'all':
-        for table_name in tables:
-            df = pd.read_sql_query(f'SELECT * FROM {table_name}', conn)
-            backup_data[table_name] = df.to_dict('records')
-    else:
-        if table in tables:
-            df = pd.read_sql_query(f'SELECT * FROM {table}', conn)
-            backup_data[table] = df.to_dict('records')
-        else:
-            conn.close()
-            return jsonify({'success': False, 'message': 'Table not found'})
-    
-    conn.close()
-    
-    # Save backup to file
-    filename = f'backup_{table}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json'
-    filepath = os.path.join(app.config['BACKUP_FOLDER'], filename)
-    
-    os.makedirs(app.config['BACKUP_FOLDER'], exist_ok=True)
-    
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(backup_data, f, ensure_ascii=False, indent=2)
-    
-    return jsonify({
-        'success': True,
-        'message': f'تم إنشاء نسخة احتياطية',
-        'filename': filename,
-        'filepath': filepath
-    })
-
-# Ads Management
-@app.route('/api/ads', methods=['GET'])
-def get_ads():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    # Get active ads that haven't expired
-    cursor.execute('''
-        SELECT * FROM ads 
-        WHERE active = 1 
-        AND (end_date IS NULL OR end_date > datetime('now'))
-        ORDER BY created_at DESC
-    ''')
-    
-    ads = cursor.fetchall()
-    conn.close()
-    
-    return jsonify([dict(ad) for ad in ads])
-
-@app.route('/api/admin/ads', methods=['GET'])
-@admin_required
-def get_admin_ads():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT a.*, u.name as creator_name
-        FROM ads a
-        LEFT JOIN users u ON a.created_by = u.id
-        ORDER BY a.created_at DESC
-    ''')
-    
-    ads = cursor.fetchall()
-    conn.close()
-    
-    return jsonify([dict(ad) for ad in ads])
-
-@app.route('/api/admin/ads', methods=['POST'])
-@admin_required
-def create_ad():
-    data = request.get_json()
-    
-    required_fields = ['title', 'description']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO ads (title, description, image_url, link, target_audience, 
-                        bg_color, text_color, btn_color, start_date, end_date, 
-                        budget, created_by, active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        data['title'],
-        data['description'],
-        data.get('image_url'),
-        data.get('link'),
-        data.get('target_audience', 'all'),
-        data.get('bg_color', '#f8f9fa'),
-        data.get('text_color', '#333333'),
-        data.get('btn_color', '#2E7D32'),
-        data.get('start_date'),
-        data.get('end_date'),
-        data.get('budget', 0),
-        request.user_id,
-        data.get('active', True)
-    ))
-    
-    ad_id = cursor.lastrowid
-    
-    conn.commit()
-    conn.close()
-    
-    return jsonify({
-        'success': True,
-        'message': 'تم إنشاء الإعلان بنجاح',
-        'ad_id': ad_id
-    })
-
-# Ad Packages
-@app.route('/api/admin/ad-packages', methods=['GET'])
-@admin_required
-def get_ad_packages():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT * FROM ad_packages WHERE active = 1 ORDER BY price')
-    packages = cursor.fetchall()
-    
-    conn.close()
-    
-    return jsonify([dict(pkg) for pkg in packages])
-
-@app.route('/api/admin/ad-packages', methods=['POST'])
-@admin_required
-def create_ad_package():
-    data = request.get_json()
-    
-    required_fields = ['name', 'price', 'duration_days']
-    for field in required_fields:
-        if field not in data:
-            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
-    
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT INTO ad_packages (name, description, duration_days, price, features, active)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (
-        data['name'],
-        data.get('description', ''),
-        data['duration_days'],
-        data['price'],
-        data.get('features', ''),
-        data.get('active', True)
-    ))
-    
-    package_id = cursor.lastrowid
-    
-    conn.commit()
-    conn.close()
-    
-    return jsonify({
-        'success': True,
-        'message': 'تم إنشاء الباقة الإعلانية بنجاح',
-        'package_id': package_id
-    })
-
-# System Settings
+# Settings routes
 @app.route('/api/admin/settings', methods=['GET'])
+@token_required
 @admin_required
-def get_settings():
-    conn = get_db()
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT * FROM settings')
-    settings = cursor.fetchall()
-    conn.close()
-    
-    settings_dict = {setting['key']: setting['value'] for setting in settings}
-    
-    return jsonify({'success': True, 'settings': settings_dict})
+def get_settings(current_user):
+    settings = SystemSetting.query.all()
+    return jsonify({s.key: s.value for s in settings})
 
-@app.route('/api/admin/settings', methods=['PUT'])
+@app.route('/api/admin/settings', methods=['POST'])
+@token_required
 @admin_required
-def update_settings():
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({'success': False, 'message': 'لا توجد بيانات'})
-    
-    conn = get_db()
-    cursor = conn.cursor()
+def update_settings(current_user):
+    data = request.json
     
     for key, value in data.items():
-        cursor.execute('''
-            UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP 
-            WHERE key = ?
-        ''', (str(value), key))
+        setting = SystemSetting.query.filter_by(key=key).first()
+        
+        if setting:
+            setting.value = value
+        else:
+            setting = SystemSetting(key=key, value=value)
+            db.session.add(setting)
     
-    conn.commit()
-    conn.close()
+    db.session.commit()
     
-    return jsonify({'success': True, 'message': 'تم تحديث الإعدادات'})
+    return jsonify({'message': 'Settings updated successfully!'})
 
-# Statistics
-@app.route('/api/admin/stats', methods=['GET'])
+# Advertisements routes
+@app.route('/api/admin/advertisements', methods=['POST'])
+@token_required
 @admin_required
-def get_stats():
-    conn = get_db()
-    cursor = conn.cursor()
+def create_advertisement(current_user):
+    data = request.json
     
-    # Total users
-    cursor.execute('SELECT COUNT(*) as total FROM users')
-    total_users = cursor.fetchone()['total']
+    advertisement = Advertisement(
+        title=data['title'],
+        content=data.get('content'),
+        image_url=data.get('image_url'),
+        type=data.get('type', 'home'),
+        position=data.get('position', 0),
+        start_date=datetime.fromisoformat(data['start_date']) if 'start_date' in data else None,
+        end_date=datetime.fromisoformat(data['end_date']) if 'end_date' in data else None,
+        status=data.get('status', 'active')
+    )
     
-    # Total orders
-    cursor.execute('SELECT COUNT(*) as total FROM orders')
-    total_orders = cursor.fetchone()['total']
+    if 'user_id' in data:
+        advertisement.user_id = data['user_id']
     
-    # Total revenue
-    cursor.execute('SELECT SUM(total_amount) as total FROM orders WHERE status = "delivered"')
-    total_revenue = cursor.fetchone()['total'] or 0
+    if 'package_id' in data:
+        advertisement.package_id = data['package_id']
     
-    # Total products
-    cursor.execute('SELECT COUNT(*) as total FROM products WHERE active = 1')
-    total_products = cursor.fetchone()['total']
-    
-    # Total sellers
-    cursor.execute('SELECT COUNT(*) as total FROM users WHERE user_type = "seller" AND active = 1')
-    total_sellers = cursor.fetchone()['total']
-    
-    # Total drivers
-    cursor.execute('SELECT COUNT(*) as total FROM drivers WHERE active = 1')
-    total_drivers = cursor.fetchone()['total']
-    
-    # Recent orders
-    cursor.execute('''
-        SELECT o.*, u.name as buyer_name
-        FROM orders o
-        JOIN users u ON o.buyer_id = u.id
-        ORDER BY o.created_at DESC
-        LIMIT 10
-    ''')
-    recent_orders = cursor.fetchall()
-    
-    conn.close()
+    db.session.add(advertisement)
+    db.session.commit()
     
     return jsonify({
-        'success': True,
-        'stats': {
-            'total_users': total_users,
-            'total_orders': total_orders,
-            'total_revenue': total_revenue,
-            'total_products': total_products,
-            'total_sellers': total_sellers,
-            'total_drivers': total_drivers
-        },
-        'recent_orders': [dict(order) for order in recent_orders]
+        'message': 'Advertisement created successfully!',
+        'advertisement': {
+            'id': advertisement.id,
+            'title': advertisement.title
+        }
+    }), 201
+
+# Package routes
+@app.route('/api/admin/packages', methods=['POST'])
+@token_required
+@admin_required
+def create_package(current_user):
+    data = request.json
+    
+    package = AdvertisementPackage(
+        name=data['name'],
+        description=data.get('description'),
+        price=data['price'],
+        duration_days=data['duration_days'],
+        features=json.dumps(data.get('features', [])),
+        max_ads=data.get('max_ads', 1)
+    )
+    
+    db.session.add(package)
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Package created successfully!',
+        'package': {
+            'id': package.id,
+            'name': package.name
+        }
+    }), 201
+
+# Gift code routes
+@app.route('/api/admin/gift-codes', methods=['POST'])
+@token_required
+@admin_required
+def create_gift_code(current_user):
+    data = request.json
+    
+    code = GiftCode(
+        code=data.get('code', secrets.token_hex(8).upper()),
+        amount=data['amount'],
+        created_by=current_user.id,
+        expiry_date=datetime.fromisoformat(data['expiry_date']) if 'expiry_date' in data else None
+    )
+    
+    db.session.add(code)
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Gift code created successfully!',
+        'code': code.code,
+        'amount': code.amount
+    }), 201
+
+@app.route('/api/wallet/redeem-gift', methods=['POST'])
+@token_required
+def redeem_gift_code(current_user):
+    data = request.json
+    
+    code = GiftCode.query.filter_by(code=data['code'], status='active').first()
+    
+    if not code:
+        return jsonify({'message': 'Invalid or expired gift code!'}), 400
+    
+    if code.expiry_date and code.expiry_date < datetime.utcnow():
+        code.status = 'expired'
+        db.session.commit()
+        return jsonify({'message': 'Gift code has expired!'}), 400
+    
+    # Redeem code
+    current_user.balance += code.amount
+    code.used_by = current_user.id
+    code.used_at = datetime.utcnow()
+    code.status = 'used'
+    
+    # Create transaction
+    transaction = WalletTransaction(
+        user_id=current_user.id,
+        type='deposit',
+        amount=code.amount,
+        balance_before=current_user.balance - code.amount,
+        balance_after=current_user.balance,
+        reference=code.code,
+        description='كود هدية'
+    )
+    db.session.add(transaction)
+    
+    db.session.commit()
+    
+    return jsonify({
+        'message': f'Gift code redeemed successfully! {code.amount} ريال added to your balance.',
+        'new_balance': current_user.balance
     })
 
-# File Upload
-@app.route('/api/upload', methods=['POST'])
+# Withdrawal routes
+@app.route('/api/wallet/withdraw', methods=['POST'])
 @token_required
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({'success': False, 'message': 'No file part'})
+def request_withdrawal(current_user):
+    data = request.json
     
-    file = request.files['file']
+    amount = data['amount']
     
-    if file.filename == '':
-        return jsonify({'success': False, 'message': 'No selected file'})
+    if amount < 50:
+        return jsonify({'message': 'Minimum withdrawal amount is 50 SAR!'}), 400
     
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        
-        # Ensure upload folder exists
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-        
-        file.save(filepath)
-        
-        return jsonify({
-            'success': True,
-            'filename': filename,
-            'filepath': filepath,
-            'url': f'/uploads/{filename}'
-        })
+    if current_user.balance < amount:
+        return jsonify({'message': 'Insufficient balance!'}), 400
     
-    return jsonify({'success': False, 'message': 'File type not allowed'})
+    withdrawal = Withdrawal(
+        user_id=current_user.id,
+        amount=amount,
+        wallet_type=data['wallet_type'],
+        wallet_number=data['wallet_number'],
+        wallet_name=data['wallet_name']
+    )
+    
+    # Reserve amount
+    current_user.balance -= amount
+    
+    db.session.add(withdrawal)
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Withdrawal request submitted successfully!',
+        'request_id': withdrawal.id
+    })
 
-# Serve uploaded files
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    return send_file(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+@app.route('/api/admin/withdrawals/<int:withdrawal_id>/approve', methods=['POST'])
+@token_required
+@admin_required
+def approve_withdrawal(current_user, withdrawal_id):
+    withdrawal = Withdrawal.query.get_or_404(withdrawal_id)
+    
+    if withdrawal.status != 'pending':
+        return jsonify({'message': 'Withdrawal already processed!'}), 400
+    
+    withdrawal.status = 'approved'
+    withdrawal.processed_at = datetime.utcnow()
+    
+    db.session.commit()
+    
+    return jsonify({'message': 'Withdrawal approved successfully!'})
 
-# Error handlers
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({'success': False, 'message': 'Endpoint not found'}), 404
+# Dashboard stats
+@app.route('/api/admin/stats', methods=['GET'])
+@token_required
+@admin_required
+def get_stats(current_user):
+    total_users = User.query.count()
+    total_sellers = User.query.filter_by(user_type='seller').count()
+    total_buyers = User.query.filter_by(user_type='buyer').count()
+    total_products = Product.query.count()
+    total_orders = Order.query.count()
+    total_revenue = db.session.query(db.func.sum(Order.total)).scalar() or 0
+    
+    recent_orders = Order.query.order_by(Order.created_at.desc()).limit(10).all()
+    
+    return jsonify({
+        'total_users': total_users,
+        'total_sellers': total_sellers,
+        'total_buyers': total_buyers,
+        'total_products': total_products,
+        'total_orders': total_orders,
+        'total_revenue': total_revenue,
+        'recent_orders': [{
+            'id': o.id,
+            'order_code': o.order_code,
+            'total': o.total,
+            'status': o.order_status,
+            'created_at': o.created_at.isoformat()
+        } for o in recent_orders]
+    })
 
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'success': False, 'message': 'Internal server error'}), 500
-
-# Create necessary folders
-os.makedirs(app.config['BACKUP_FOLDER'], exist_ok=True)
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+# Initialize database
+@app.before_first_request
+def create_tables():
+    db.create_all()
+    
+    # Create admin user if not exists
+    if not User.query.filter_by(email='admin@qat.com').first():
+        admin = User(
+            name='مدير النظام',
+            email='admin@qat.com',
+            phone='771831482',
+            user_type='admin'
+        )
+        admin.set_password('admin123')
+        admin.balance = 10000
+        db.session.add(admin)
+        db.session.commit()
+    
+    # Create default settings
+    default_settings = {
+        'app_name': 'تطبيق قات',
+        'washing_price': '100',
+        'delivery_fee': '0',
+        'min_withdrawal': '50',
+        'primary_color': '#2E7D32',
+        'secondary_color': '#FF9800',
+        'contact_phone': '771831482',
+        'contact_email': 'support@qat.com'
+    }
+    
+    for key, value in default_settings.items():
+        if not SystemSetting.query.filter_by(key=key).first():
+            setting = SystemSetting(key=key, value=value)
+            db.session.add(setting)
+    
+    db.session.commit()
 
 if __name__ == '__main__':
-    # Create default admin if not exists
-    init_db()
-    
-    print("🎯 تطبيق قات - منصة متكاملة")
-    print("=" * 50)
-    print("🔗 الموقع: http://localhost:5000")
-    print("👑 حساب المدير: admin@qat.com / admin123")
-    print("🛍️ حساب البائع: seller@qat.com / seller123")
-    print("🛒 حساب المشتري: buyer@qat.com / buyer123")
-    print("=" * 50)
-    print("\n📊 الميزات المتاحة:")
-    print("  • نظام متكامل لإدارة بيع وتوصيل القات")
-    print("  • نوعان من المستخدمين: بائعين ومشترين")
-    print("  • خدمة غسل القات (+100 ريال)")
-    print("  • إدارة الأسواق والمغاسل والمندوبين")
-    print("  • نظام محفظة إلكترونية متكامل")
-    print("  • إعلانات وباقات إعلانية")
-    print("  • تقييمات وتعليقات")
-    print("  • نسخ احتياطي لقاعدة البيانات")
-    print("  • إحصائيات وتقارير متقدمة")
-    
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(debug=True, port=5000)
