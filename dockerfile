@@ -1,14 +1,14 @@
-FROM python:3.9-slim
+FROM node:18-alpine
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY package*.json ./
+RUN npm ci --only=production
 
 COPY . .
 
-RUN mkdir -p backups uploads
+RUN mkdir -p database uploads backups
 
-EXPOSE 5000
+EXPOSE 3000
 
-CMD ["python", "server.py"]
+CMD ["node", "server.js"]
