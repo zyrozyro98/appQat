@@ -1,21 +1,15 @@
 services:
   - type: web
     name: qat-app
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn server:app
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
     envVars:
-      - key: SECRET_KEY
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: JWT_SECRET
         generateValue: true
-      - key: DATABASE_URL
-        fromDatabase:
-          name: qat-db
-          property: connectionString
-    healthCheckPath: /
-    autoDeploy: true
-
-databases:
-  - name: qat-db
-    databaseName: qat_app
-    user: qat_user
-    plan: free
+      - key: SESSION_SECRET
+        generateValue: true
