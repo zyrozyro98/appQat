@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>لوحة تحكم المدير - تطبيق قات</title>
+    <link rel="stylesheet" href="/css/admin.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="admin-container">
+        <!-- شريط التنقل الجانبي -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-crown"></i> المدير</h2>
+            </div>
+            <nav class="sidebar-nav">
+                <ul>
+                    <li><a href="#dashboard" class="active"><i class="fas fa-tachometer-alt"></i> لوحة التحكم</a></li>
+                    <li><a href="#markets"><i class="fas fa-store"></i> إدارة الأسواق</a></li>
+                    <li><a href="#washing-stations"><i class="fas fa-shower"></i> مغاسل القات</a></li>
+                    <li><a href="#drivers"><i class="fas fa-motorcycle"></i> مندوبي التوصيل</a></li>
+                    <li><a href="#users"><i class="fas fa-users"></i> إدارة المستخدمين</a></li>
+                    <li><a href="#products"><i class="fas fa-box"></i> إدارة المنتجات</a></li>
+                    <li><a href="#orders"><i class="fas fa-shopping-cart"></i> الطلبات</a></li>
+                    <li><a href="#ads"><i class="fas fa-ad"></i> الإعلانات</a></li>
+                    <li><a href="#coupons"><i class="fas fa-gift"></i> كوبونات الهدايا</a></li>
+                    <li><a href="#transactions"><i class="fas fa-money-bill-wave"></i> المعاملات</a></li>
+                    <li><a href="#settings"><i class="fas fa-cog"></i> الإعدادات</a></li>
+                    <li><a href="#backup"><i class="fas fa-database"></i> النسخ الاحتياطي</a></li>
+                </ul>
+            </nav>
+        </aside>
+
+        <!-- المحتوى الرئيسي -->
+        <main class="main-content">
+            <!-- شريط العنوان العلوي -->
+            <header class="topbar">
+                <div class="search-box">
+                    <i class="fas fa-search"></i>
+                    <input type="text" placeholder="بحث...">
+                </div>
+                <div class="user-info">
+                    <span id="adminName">المدير</span>
+                    <div class="notifications">
+                        <i class="fas fa-bell"></i>
+                        <span class="badge" id="notificationCount">0</span>
+                    </div>
+                    <button class="btn-logout" onclick="logout()">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <!-- المحتوى الديناميكي -->
+            <div class="content-area">
+                <!-- سيتم تحميل المحتوى هنا -->
+                <div id="dashboard" class="content-section">
+                    <h1>لوحة التحكم</h1>
+                    <!-- الإحصائيات -->
+                    <div class="stats-grid" id="statsContainer">
+                        <!-- سيتم تحميل الإحصائيات -->
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- النوافذ المنبثقة -->
+    <div id="modalOverlay" class="modal-overlay"></div>
+
+    <!-- نافذة إضافة سوق -->
+    <div id="addMarketModal" class="modal">
+        <div class="modal-header">
+            <h3>إضافة سوق جديد</h3>
+            <button class="close-modal" onclick="closeModal('addMarketModal')">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="addMarketForm">
+                <div class="form-group">
+                    <label>اسم السوق</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>الموقع</label>
+                    <input type="text" name="location" required>
+                </div>
+                <div class="form-group">
+                    <label>العنوان التفصيلي</label>
+                    <textarea name="address" rows="3" required></textarea>
+                </div>
+                <div class="form-group">
+                    <label>رقم الهاتف</label>
+                    <input type="tel" name="phone" required>
+                </div>
+                <div class="form-group">
+                    <label>اسم المدير</label>
+                    <input type="text" name="managerName" required>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" name="isActive" checked>
+                        نشط
+                    </label>
+                </div>
+                <button type="submit" class="btn-primary">حفظ</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- نافذة إضافة مغسلة -->
+    <div id="addWashingStationModal" class="modal">
+        <div class="modal-header">
+            <h3>إضافة مغسلة قات</h3>
+            <button class="close-modal" onclick="closeModal('addWashingStationModal')">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="addWashingStationForm">
+                <div class="form-group">
+                    <label>اسم المغسلة</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>السوق</label>
+                    <select name="marketId" id="marketSelect" required>
+                        <!-- سيتم تعبئة الأسواق -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>الموقع داخل السوق</label>
+                    <input type="text" name="location" required>
+                </div>
+                <div class="form-group">
+                    <label>رقم الهاتف</label>
+                    <input type="tel" name="phone" required>
+                </div>
+                <div class="form-group">
+                    <label>اسم المسؤول</label>
+                    <input type="text" name="managerName" required>
+                </div>
+                <div class="form-group">
+                    <label>سعر الغسيل (ريال)</label>
+                    <input type="number" name="washingPrice" value="100" min="0" required>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" name="isActive" checked>
+                        نشط
+                    </label>
+                </div>
+                <button type="submit" class="btn-primary">حفظ</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- نافذة إضافة مندوب -->
+    <div id="addDriverModal" class="modal">
+        <div class="modal-header">
+            <h3>إضافة مندوب توصيل</h3>
+            <button class="close-modal" onclick="closeModal('addDriverModal')">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="addDriverForm">
+                <div class="form-group">
+                    <label>اسم المندوب</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>رقم الهاتف</label>
+                    <input type="tel" name="phone" required>
+                </div>
+                <div class="form-group">
+                    <label>نوع المركبة</label>
+                    <select name="vehicleType" required>
+                        <option value="motorcycle">دراجة نارية</option>
+                        <option value="car">سيارة</option>
+                        <option value="bicycle">دراجة هوائية</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>رقم المركبة</label>
+                    <input type="text" name="vehicleNumber" required>
+                </div>
+                <div class="form-group">
+                    <label>السوق</label>
+                    <select name="marketId" required>
+                        <!-- سيتم تعبئة الأسواق -->
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" name="isActive" checked>
+                        نشط
+                    </label>
+                </div>
+                <button type="submit" class="btn-primary">حفظ</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="/js/admin.js"></script>
+</body>
+</html>
