@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p uploads backups
+RUN mkdir -p backups uploads
 
 EXPOSE 5000
 
