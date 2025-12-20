@@ -1,4 +1,4 @@
-# server.py
+# server.py (محدث)
 import os
 import json
 import sqlite3
@@ -7,13 +7,13 @@ import string
 from datetime import datetime, timedelta
 from functools import wraps
 import pandas as pd
-from flask import Flask, request, jsonify, send_file, make_response
+from flask import Flask, request, jsonify, send_file, send_from_directory, make_response
 from flask_cors import CORS
 import jwt
 import hashlib
 from werkzeug.utils import secure_filename
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app, supports_credentials=True)
 
 # Configuration
@@ -288,8 +288,62 @@ def init_db():
             VALUES (?, ?, ?, ?, ?, ?)
         ''', ('مدير النظام', 'admin@qat.com', '771831482', hashed_password, 'admin', 0))
     
+    # Add sample data
+    add_sample_data(cursor)
+    
     conn.commit()
     conn.close()
+
+def add_sample_data(cursor):
+    """Add sample data for testing"""
+    # Add sample seller
+    cursor.execute("SELECT COUNT(*) FROM users WHERE email = 'seller@qat.com'")
+    if cursor.fetchone()[0] == 0:
+        hashed_password = hashlib.sha256('seller123'.encode()).hexdigest()
+        cursor.execute('''
+            INSERT INTO users (name, email, phone, password, user_type, store_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', ('أحمد التاجر', 'seller@qat.com', '771234567', hashed_password, 'seller', 'متجر القات الفاخر'))
+    
+    # Add sample buyer
+    cursor.execute("SELECT COUNT(*) FROM users WHERE email = 'buyer@qat.com'")
+    if cursor.fetchone()[0] == 0:
+        hashed_password = hashlib.sha256('buyer123'.encode()).hexdigest()
+        cursor.execute('''
+            INSERT INTO users (name, email, phone, password, user_type, wallet_balance)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', ('محمد المشتري', 'buyer@qat.com', '771987654', hashed_password, 'buyer', 1000))
+    
+    # Add sample market
+    cursor.execute("SELECT COUNT(*) FROM markets WHERE name = 'سوق القات المركزي'")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute('''
+            INSERT INTO markets (name, city, address)
+            VALUES (?, ?, ?)
+        ''', ('سوق القات المركزي', 'صنعاء', 'شارع الزبيري، صنعاء'))
+    
+    # Add sample products
+    cursor.execute("SELECT COUNT(*) FROM products")
+    if cursor.fetchone()[0] == 0:
+        # Get seller ID
+        cursor.execute("SELECT id FROM users WHERE email = 'seller@qat.com'")
+        seller = cursor.fetchone()
+        if seller:
+            seller_id = seller[0]
+            products = [
+                ('قات صعدي ممتاز', 'أجود أنواع القات الصعدي من أفضل المزارع', 60, 'صعدي', 50, True),
+                ('قات همداني فاخر', 'قات همداني طازج بنكهة مميزة', 55, 'همداني', 30, True),
+                ('قات أرحبي طازج', 'قات أرحبي طازج من مزارع أرحب', 45, 'أرحبي', 40, False),
+                ('قات حيوفي مميز', 'نوعية مميزة من القات الحيوفي', 50, 'حيوفي', 25, True),
+                ('قات نقفة طازج', 'قات نقفة طازج بسعر مناسب', 35, 'نقفة', 60, False),
+                ('قات روس فاخر', 'أجود أنواع القات الروس الفاخر', 65, 'روس', 20, True)
+            ]
+            
+            for name, desc, price, type, stock, washing in products:
+                cursor.execute('''
+                    INSERT INTO products (seller_id, name, description, price, type, stock, washing_available)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (seller_id, name, desc, price, type, stock, washing))
 
 # Initialize database
 init_db()
@@ -388,6 +442,18 @@ def create_notification(user_id, title, message, type='system', related_id=None)
     ''', (user_id, title, message, type, related_id))
     conn.commit()
     conn.close()
+
+# Serve HTML files
+@app.route('/')
+def index():
+    return send_from_directory('.', 'index.html')
+
+@app.route('/<path:path>')
+def serve_file(path):
+    if os.path.exists(path):
+        return send_from_directory('.', path)
+    else:
+        return send_from_directory('.', 'index.html')
 
 # API Routes
 
@@ -618,7 +684,7 @@ def create_order():
     cursor.execute('''
         SELECT m.id as market_id, ws.id as washing_station_id
         FROM users u
-        LEFT JOIN markets m ON 1=1  # In real app, link seller to market
+        LEFT JOIN markets m ON 1=1
         LEFT JOIN washing_stations ws ON ws.market_id = m.id
         WHERE u.id = ?
         LIMIT 1
@@ -668,11 +734,22 @@ def create_order():
     cursor.execute('UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ?', 
                   (total_amount, request.user_id))
     
+    # Add to seller's wallet
+    seller_earnings = total_amount - 15  # Minus delivery fee
+    cursor.execute('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?', 
+                  (seller_earnings, seller_id))
+    
     # Add transaction for buyer
     cursor.execute('''
         INSERT INTO transactions (user_id, type, amount, status, description)
         VALUES (?, ?, ?, ?, ?)
     ''', (request.user_id, 'purchase', total_amount, 'completed', f'طلب #{order_number}'))
+    
+    # Add transaction for seller
+    cursor.execute('''
+        INSERT INTO transactions (user_id, type, amount, status, description)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (seller_id, 'sale', seller_earnings, 'completed', f'طلب #{order_number}'))
     
     # Notifications
     # Notify buyer
@@ -699,7 +776,7 @@ def create_order():
         washing_station = cursor.fetchone()
         if washing_station:
             create_notification(
-                seller_id,  # For now, notify seller about washing
+                seller_id,
                 'طلب غسيل',
                 f'طلب غسيل جديد للطلب #{order_number}',
                 'order',
@@ -729,6 +806,38 @@ def create_order():
             'total': total_amount
         }
     })
+
+@app.route('/api/orders/my', methods=['GET'])
+@token_required
+def get_my_orders():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    user_type = request.user_type
+    
+    if user_type == 'buyer':
+        cursor.execute('''
+            SELECT o.*, u.name as seller_name
+            FROM orders o
+            JOIN users u ON o.seller_id = u.id
+            WHERE o.buyer_id = ?
+            ORDER BY o.created_at DESC
+        ''', (request.user_id,))
+    elif user_type == 'seller':
+        cursor.execute('''
+            SELECT o.*, u.name as buyer_name
+            FROM orders o
+            JOIN users u ON o.buyer_id = u.id
+            WHERE o.seller_id = ?
+            ORDER BY o.created_at DESC
+        ''', (request.user_id,))
+    else:
+        cursor.execute('SELECT * FROM orders ORDER BY created_at DESC')
+    
+    orders = cursor.fetchall()
+    conn.close()
+    
+    return jsonify([dict(order) for order in orders])
 
 # Wallet
 @app.route('/api/wallet', methods=['GET'])
@@ -768,8 +877,7 @@ def charge_wallet():
     
     transaction_id = cursor.lastrowid
     
-    # In real app, integrate with payment gateway
-    # For now, simulate successful payment
+    # Simulate successful payment
     cursor.execute('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?', 
                   (amount, request.user_id))
     
@@ -823,8 +931,7 @@ def withdraw_wallet():
     
     transaction_id = cursor.lastrowid
     
-    # In real app, process withdrawal
-    # For now, simulate processing
+    # Deduct from balance
     cursor.execute('UPDATE users SET wallet_balance = wallet_balance - ? WHERE id = ?', 
                   (amount, request.user_id))
     
@@ -850,6 +957,24 @@ def withdraw_wallet():
         'success': True,
         'message': 'تم إرسال طلب السحب، سيتم المعالجة خلال 24 ساعة'
     })
+
+@app.route('/api/wallet/transactions', methods=['GET'])
+@token_required
+def get_transactions():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT * FROM transactions 
+        WHERE user_id = ? 
+        ORDER BY created_at DESC
+        LIMIT 50
+    ''', (request.user_id,))
+    
+    transactions = cursor.fetchall()
+    conn.close()
+    
+    return jsonify([dict(trans) for trans in transactions])
 
 # Notifications
 @app.route('/api/notifications', methods=['GET'])
@@ -973,6 +1098,43 @@ def get_washing_stations():
     
     return jsonify([dict(station) for station in stations])
 
+@app.route('/api/admin/washing-stations', methods=['POST'])
+@admin_required
+def create_washing_station():
+    data = request.get_json()
+    
+    required_fields = ['name', 'market_id']
+    for field in required_fields:
+        if field not in data:
+            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO washing_stations (market_id, name, owner_name, phone, address, capacity, active)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        data['market_id'],
+        data['name'],
+        data.get('owner_name', ''),
+        data.get('phone', ''),
+        data.get('address', ''),
+        data.get('capacity', 10),
+        data.get('active', True)
+    ))
+    
+    station_id = cursor.lastrowid
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'message': 'تم إنشاء مغسلة القات بنجاح',
+        'station_id': station_id
+    })
+
 # Drivers Management
 @app.route('/api/admin/drivers', methods=['GET'])
 @admin_required
@@ -991,6 +1153,58 @@ def get_drivers():
     conn.close()
     
     return jsonify([dict(driver) for driver in drivers])
+
+@app.route('/api/admin/drivers', methods=['POST'])
+@admin_required
+def create_driver():
+    data = request.get_json()
+    
+    required_fields = ['name', 'phone']
+    for field in required_fields:
+        if field not in data:
+            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # First create user account
+    hashed_password = hash_password('driver123')  # Default password
+    
+    cursor.execute('''
+        INSERT INTO users (name, email, phone, password, user_type)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (
+        data['name'],
+        data.get('email', f"{data['phone']}@qat.com"),
+        data['phone'],
+        hashed_password,
+        'driver'
+    ))
+    
+    user_id = cursor.lastrowid
+    
+    # Then create driver record
+    cursor.execute('''
+        INSERT INTO drivers (user_id, name, phone, vehicle_type, vehicle_number)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (
+        user_id,
+        data['name'],
+        data['phone'],
+        data.get('vehicle_type', 'دراجة نارية'),
+        data.get('vehicle_number', '')
+    ))
+    
+    driver_id = cursor.lastrowid
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'message': 'تم إنشاء مندوب التوصيل بنجاح',
+        'driver_id': driver_id
+    })
 
 # Users Management
 @app.route('/api/admin/users', methods=['GET'])
@@ -1049,7 +1263,8 @@ def export_users():
 @app.route('/api/admin/backup', methods=['POST'])
 @admin_required
 def create_backup():
-    table = request.get_json().get('table', 'all')
+    data = request.get_json()
+    table = data.get('table', 'all')
     
     conn = get_db()
     
@@ -1127,6 +1342,101 @@ def get_admin_ads():
     
     return jsonify([dict(ad) for ad in ads])
 
+@app.route('/api/admin/ads', methods=['POST'])
+@admin_required
+def create_ad():
+    data = request.get_json()
+    
+    required_fields = ['title', 'description']
+    for field in required_fields:
+        if field not in data:
+            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO ads (title, description, image_url, link, target_audience, 
+                        bg_color, text_color, btn_color, start_date, end_date, 
+                        budget, created_by, active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        data['title'],
+        data['description'],
+        data.get('image_url'),
+        data.get('link'),
+        data.get('target_audience', 'all'),
+        data.get('bg_color', '#f8f9fa'),
+        data.get('text_color', '#333333'),
+        data.get('btn_color', '#2E7D32'),
+        data.get('start_date'),
+        data.get('end_date'),
+        data.get('budget', 0),
+        request.user_id,
+        data.get('active', True)
+    ))
+    
+    ad_id = cursor.lastrowid
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'message': 'تم إنشاء الإعلان بنجاح',
+        'ad_id': ad_id
+    })
+
+# Ad Packages
+@app.route('/api/admin/ad-packages', methods=['GET'])
+@admin_required
+def get_ad_packages():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT * FROM ad_packages WHERE active = 1 ORDER BY price')
+    packages = cursor.fetchall()
+    
+    conn.close()
+    
+    return jsonify([dict(pkg) for pkg in packages])
+
+@app.route('/api/admin/ad-packages', methods=['POST'])
+@admin_required
+def create_ad_package():
+    data = request.get_json()
+    
+    required_fields = ['name', 'price', 'duration_days']
+    for field in required_fields:
+        if field not in data:
+            return jsonify({'success': False, 'message': f'حقل {field} مطلوب'})
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO ad_packages (name, description, duration_days, price, features, active)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (
+        data['name'],
+        data.get('description', ''),
+        data['duration_days'],
+        data['price'],
+        data.get('features', ''),
+        data.get('active', True)
+    ))
+    
+    package_id = cursor.lastrowid
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'message': 'تم إنشاء الباقة الإعلانية بنجاح',
+        'package_id': package_id
+    })
+
 # System Settings
 @app.route('/api/admin/settings', methods=['GET'])
 @admin_required
@@ -1187,6 +1497,14 @@ def get_stats():
     cursor.execute('SELECT COUNT(*) as total FROM products WHERE active = 1')
     total_products = cursor.fetchone()['total']
     
+    # Total sellers
+    cursor.execute('SELECT COUNT(*) as total FROM users WHERE user_type = "seller" AND active = 1')
+    total_sellers = cursor.fetchone()['total']
+    
+    # Total drivers
+    cursor.execute('SELECT COUNT(*) as total FROM drivers WHERE active = 1')
+    total_drivers = cursor.fetchone()['total']
+    
     # Recent orders
     cursor.execute('''
         SELECT o.*, u.name as buyer_name
@@ -1205,7 +1523,9 @@ def get_stats():
             'total_users': total_users,
             'total_orders': total_orders,
             'total_revenue': total_revenue,
-            'total_products': total_products
+            'total_products': total_products,
+            'total_sellers': total_sellers,
+            'total_drivers': total_drivers
         },
         'recent_orders': [dict(order) for order in recent_orders]
     })
@@ -1240,7 +1560,7 @@ def upload_file():
     
     return jsonify({'success': False, 'message': 'File type not allowed'})
 
-# Serve static files
+# Serve uploaded files
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_file(os.path.join(app.config['UPLOAD_FOLDER'], filename))
@@ -1262,28 +1582,22 @@ if __name__ == '__main__':
     # Create default admin if not exists
     init_db()
     
-    print("Starting Qat App Server...")
-    print(f"Database: {app.config['DATABASE']}")
-    print("API Endpoints:")
-    print("  POST /api/login - User login")
-    print("  POST /api/register - User registration")
-    print("  GET  /api/products - Get products")
-    print("  POST /api/products - Create product (seller)")
-    print("  POST /api/orders/create - Create order")
-    print("  GET  /api/wallet - Get wallet balance")
-    print("  POST /api/wallet/charge - Charge wallet")
-    print("  POST /api/wallet/withdraw - Withdraw from wallet")
-    print("  GET  /api/notifications - Get notifications")
-    print("\nAdmin Endpoints (require admin token):")
-    print("  GET  /api/admin/markets - Get markets")
-    print("  POST /api/admin/markets - Create market")
-    print("  GET  /api/admin/washing-stations - Get washing stations")
-    print("  GET  /api/admin/drivers - Get drivers")
-    print("  GET  /api/admin/users - Get users")
-    print("  GET  /api/admin/export/users - Export users to Excel")
-    print("  POST /api/admin/backup - Create backup")
-    print("  GET  /api/admin/settings - Get settings")
-    print("  PUT  /api/admin/settings - Update settings")
-    print("  GET  /api/admin/stats - Get statistics")
+    print("🎯 تطبيق قات - منصة متكاملة")
+    print("=" * 50)
+    print("🔗 الموقع: http://localhost:5000")
+    print("👑 حساب المدير: admin@qat.com / admin123")
+    print("🛍️ حساب البائع: seller@qat.com / seller123")
+    print("🛒 حساب المشتري: buyer@qat.com / buyer123")
+    print("=" * 50)
+    print("\n📊 الميزات المتاحة:")
+    print("  • نظام متكامل لإدارة بيع وتوصيل القات")
+    print("  • نوعان من المستخدمين: بائعين ومشترين")
+    print("  • خدمة غسل القات (+100 ريال)")
+    print("  • إدارة الأسواق والمغاسل والمندوبين")
+    print("  • نظام محفظة إلكترونية متكامل")
+    print("  • إعلانات وباقات إعلانية")
+    print("  • تقييمات وتعليقات")
+    print("  • نسخ احتياطي لقاعدة البيانات")
+    print("  • إحصائيات وتقارير متقدمة")
     
     app.run(host='0.0.0.0', port=5000, debug=True)
