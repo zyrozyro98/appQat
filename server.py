@@ -1,1064 +1,902 @@
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, ForeignKey
-from sqlalchemy.orm import relationship
-from datetime import datetime, timedelta
-import json
-import os
-import csv
-import pandas as pd
-from io import BytesIO
-import secrets
-import hashlib
-import jwt
-from functools import wraps
-import logging
+const express = require('express');
+const session = require('express-session');
+const bodyParser = require('body-parser');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const nodemailer = require('nodemailer');
+const ExcelJS = require('exceljs');
 
-# Configuration
-app = Flask(__name__)
-CORS(app)
-app.config['SECRET_KEY'] = 'your-secret-key-change-this-in-production'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///qat_app.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-# Database
-db = SQLAlchemy(app)
+// تهيئة قاعدة البيانات المحلية
+const DB_FILE = path.join(__dirname, 'database', 'database.json');
+let database = {};
 
-# Models
-class User(db.Model):
-    __tablename__ = 'users'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False)
-    email = Column(String(100), unique=True, nullable=False)
-    phone = Column(String(20), nullable=False)
-    password_hash = Column(String(200), nullable=False)
-    user_type = Column(String(20), nullable=False)  # admin, seller, buyer, driver, washer
-    balance = Column(Float, default=0.0)
-    store_name = Column(String(100))
-    vehicle_type = Column(String(50))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    status = Column(String(20), default='active')
-    
-    # Relationships
-    products = relationship('Product', backref='seller', lazy=True)
-    orders_as_buyer = relationship('Order', foreign_keys='Order.buyer_id', backref='buyer', lazy=True)
-    orders_as_seller = relationship('Order', foreign_keys='Order.seller_id', backref='seller', lazy=True)
-    advertisements = relationship('Advertisement', backref='user', lazy=True)
-    withdrawals = relationship('Withdrawal', backref='user', lazy=True)
-    
-    def set_password(self, password):
-        self.password_hash = hashlib.sha256(password.encode()).hexdigest()
-    
-    def check_password(self, password):
-        return self.password_hash == hashlib.sha256(password.encode()).hexdigest()
-    
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'name': self.name,
-            'email': self.email,
-            'phone': self.phone,
-            'user_type': self.user_type,
-            'balance': self.balance,
-            'store_name': self.store_name,
-            'vehicle_type': self.vehicle_type,
-            'created_at': self.created_at.isoformat()
-        }
+// تحميل قاعدة البيانات
+function loadDatabase() {
+    if (fs.existsSync(DB_FILE)) {
+        const data = fs.readFileSync(DB_FILE, 'utf8');
+        database = JSON.parse(data);
+    } else {
+        database = {
+            users: [],
+            products: [],
+            orders: [],
+            markets: [],
+            washingStations: [],
+            drivers: [],
+            advertisements: [],
+            packages: [],
+            wallets: [],
+            transactions: [],
+            notifications: [],
+            coupons: [],
+            backups: []
+        };
+        saveDatabase();
+    }
+}
 
-class Market(db.Model):
-    __tablename__ = 'markets'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False)
-    location = Column(String(200))
-    address = Column(Text)
-    phone = Column(String(20))
-    manager_name = Column(String(100))
-    status = Column(String(20), default='active')
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    washers = relationship('Washer', backref='market', lazy=True)
-    products = relationship('Product', backref='market', lazy=True)
+// حفظ قاعدة البيانات
+function saveDatabase() {
+    fs.writeFileSync(DB_FILE, JSON.stringify(database, null, 2), 'utf8');
+}
 
-class Washer(db.Model):
-    __tablename__ = 'washers'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False)
-    market_id = Column(Integer, ForeignKey('markets.id'), nullable=False)
-    phone = Column(String(20))
-    address = Column(Text)
-    washing_price = Column(Float, default=100.0)
-    status = Column(String(20), default='active')
-    created_at = Column(DateTime, default=datetime.utcnow)
+// تكوين multer للملفات
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, 'uploads/')
+    },
+    filename: function (req, file, cb) {
+        cb(null, Date.now() + '-' + file.originalname)
+    }
+});
 
-class Driver(db.Model):
-    __tablename__ = 'drivers'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False)
-    phone = Column(String(20))
-    vehicle_type = Column(String(50))
-    vehicle_number = Column(String(50))
-    status = Column(String(20), default='available')  # available, busy, offline
-    rating = Column(Float, default=5.0)
-    completed_orders = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relationships
-    orders = relationship('Order', backref='driver', lazy=True)
+const upload = multer({ storage: storage });
 
-class Product(db.Model):
-    __tablename__ = 'products'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String(200), nullable=False)
-    description = Column(Text)
-    price = Column(Float, nullable=False)
-    category = Column(String(50))
-    seller_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    market_id = Column(Integer, ForeignKey('markets.id'))
-    stock = Column(Integer, default=0)
-    has_washing = Column(Boolean, default=True)
-    washing_price = Column(Float, default=100.0)
-    images = Column(Text)  # JSON array of image URLs
-    rating = Column(Float, default=5.0)
-    total_ratings = Column(Integer, default=0)
-    status = Column(String(20), default='active')
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relationships
-    order_items = relationship('OrderItem', backref='product', lazy=True)
-    reviews = relationship('Review', backref='product', lazy=True)
+// Middleware
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.static('public'));
+app.use('/uploads', express.static('uploads'));
+app.use(session({
+    secret: 'qat-app-secret-key',
+    resave: false,
+    saveUninitialized: true
+}));
 
-class Order(db.Model):
-    __tablename__ = 'orders'
-    
-    id = Column(Integer, primary_key=True)
-    order_code = Column(String(50), unique=True, nullable=False)
-    buyer_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    seller_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    driver_id = Column(Integer, ForeignKey('drivers.id'))
-    washer_id = Column(Integer, ForeignKey('washers.id'))
-    
-    subtotal = Column(Float, nullable=False)
-    washing_price = Column(Float, default=0.0)
-    delivery_fee = Column(Float, default=0.0)
-    total = Column(Float, nullable=False)
-    
-    delivery_address = Column(Text, nullable=False)
-    delivery_notes = Column(Text)
-    
-    payment_method = Column(String(50))
-    payment_status = Column(String(20), default='pending')  # pending, paid, failed
-    payment_reference = Column(String(100))
-    
-    order_status = Column(String(20), default='pending')  # pending, confirmed, washing, delivering, delivered, cancelled
-    
-    washing_required = Column(Boolean, default=False)
-    washing_status = Column(String(20), default='pending')  # pending, washing, completed
-    
-    estimated_delivery = Column(DateTime)
-    delivered_at = Column(DateTime)
-    
-    seller_notified = Column(Boolean, default=False)
-    washer_notified = Column(Boolean, default=False)
-    driver_notified = Column(Boolean, default=False)
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relationships
-    items = relationship('OrderItem', backref='order', lazy=True)
-    notifications = relationship('Notification', backref='order', lazy=True)
+// JWT Secret
+const JWT_SECRET = 'your-jwt-secret-key-change-in-production';
 
-class OrderItem(db.Model):
-    __tablename__ = 'order_items'
-    
-    id = Column(Integer, primary_key=True)
-    order_id = Column(Integer, ForeignKey('orders.id'), nullable=False)
-    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
-    quantity = Column(Integer, nullable=False)
-    price = Column(Float, nullable=False)
-    washing = Column(Boolean, default=False)
-    washing_price = Column(Float, default=0.0)
-
-class Review(db.Model):
-    __tablename__ = 'reviews'
-    
-    id = Column(Integer, primary_key=True)
-    product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    order_id = Column(Integer, ForeignKey('orders.id'))
-    rating = Column(Integer, nullable=False)
-    comment = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class Advertisement(db.Model):
-    __tablename__ = 'advertisements'
-    
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'))
-    package_id = Column(Integer, ForeignKey('advertisement_packages.id'))
-    title = Column(String(200), nullable=False)
-    content = Column(Text)
-    image_url = Column(String(500))
-    type = Column(String(50))  # home, banner, sidebar, popup
-    position = Column(Integer, default=0)
-    start_date = Column(DateTime)
-    end_date = Column(DateTime)
-    clicks = Column(Integer, default=0)
-    impressions = Column(Integer, default=0)
-    status = Column(String(20), default='active')
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class AdvertisementPackage(db.Model):
-    __tablename__ = 'advertisement_packages'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False)
-    description = Column(Text)
-    price = Column(Float, nullable=False)
-    duration_days = Column(Integer, nullable=False)
-    features = Column(Text)  # JSON array of features
-    max_ads = Column(Integer, default=1)
-    status = Column(String(20), default='active')
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class Notification(db.Model):
-    __tablename__ = 'notifications'
-    
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    order_id = Column(Integer, ForeignKey('orders.id'))
-    title = Column(String(200), nullable=False)
-    message = Column(Text, nullable=False)
-    type = Column(String(50))  # order, payment, system, promotion
-    read = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class WalletTransaction(db.Model):
-    __tablename__ = 'wallet_transactions'
-    
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    type = Column(String(20), nullable=False)  # deposit, withdrawal, purchase, sale, refund
-    amount = Column(Float, nullable=False)
-    balance_before = Column(Float, nullable=False)
-    balance_after = Column(Float, nullable=False)
-    reference = Column(String(100))
-    description = Column(Text)
-    status = Column(String(20), default='completed')
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class Withdrawal(db.Model):
-    __tablename__ = 'withdrawals'
-    
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    amount = Column(Float, nullable=False)
-    wallet_type = Column(String(50))  # jib, jawaly, mobile_money, etc.
-    wallet_number = Column(String(50))
-    wallet_name = Column(String(100))
-    status = Column(String(20), default='pending')  # pending, approved, rejected, completed
-    admin_notes = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    processed_at = Column(DateTime)
-
-class GiftCode(db.Model):
-    __tablename__ = 'gift_codes'
-    
-    id = Column(Integer, primary_key=True)
-    code = Column(String(50), unique=True, nullable=False)
-    amount = Column(Float, nullable=False)
-    created_by = Column(Integer, ForeignKey('users.id'))
-    used_by = Column(Integer, ForeignKey('users.id'))
-    used_at = Column(DateTime)
-    expiry_date = Column(DateTime)
-    status = Column(String(20), default='active')  # active, used, expired
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-class SystemSetting(db.Model):
-    __tablename__ = 'system_settings'
-    
-    id = Column(Integer, primary_key=True)
-    key = Column(String(100), unique=True, nullable=False)
-    value = Column(Text)
-    description = Column(Text)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-# Auth decorator
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        
-        if 'Authorization' in request.headers:
-            token = request.headers['Authorization'].split(" ")[1]
-        
-        if not token:
-            return jsonify({'message': 'Token is missing!'}), 401
-        
-        try:
-            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
-            current_user = User.query.get(data['user_id'])
-        except:
-            return jsonify({'message': 'Token is invalid!'}), 401
-        
-        return f(current_user, *args, **kwargs)
-    
-    return decorated
-
-def admin_required(f):
-    @wraps(f)
-    def decorated(current_user, *args, **kwargs):
-        if current_user.user_type != 'admin':
-            return jsonify({'message': 'Admin access required!'}), 403
-        return f(current_user, *args, **kwargs)
-    return decorated
-
-def seller_required(f):
-    @wraps(f)
-    def decorated(current_user, *args, **kwargs):
-        if current_user.user_type != 'seller':
-            return jsonify({'message': 'Seller access required!'}), 403
-        return f(current_user, *args, **kwargs)
-    return decorated
-
-# Routes
-@app.route('/')
-def index():
-    return jsonify({'message': 'Qat App API', 'version': '1.0.0'})
-
-# Auth routes
-@app.route('/api/auth/register', methods=['POST'])
-def register():
-    data = request.json
-    
-    # Check if user exists
-    if User.query.filter_by(email=data['email']).first():
-        return jsonify({'message': 'User already exists!'}), 400
-    
-    # Create new user
-    user = User(
-        name=data['name'],
-        email=data['email'],
-        phone=data['phone'],
-        user_type=data.get('user_type', 'buyer')
-    )
-    
-    if 'store_name' in data:
-        user.store_name = data['store_name']
-    
-    if 'vehicle_type' in data:
-        user.vehicle_type = data['vehicle_type']
-    
-    user.set_password(data['password'])
-    
-    db.session.add(user)
-    db.session.commit()
-    
-    # Create token
-    token = jwt.encode({
-        'user_id': user.id,
-        'exp': datetime.utcnow() + timedelta(days=30)
-    }, app.config['SECRET_KEY'])
-    
-    return jsonify({
-        'message': 'User created successfully!',
-        'token': token,
-        'user': user.to_dict()
-    }), 201
-
-@app.route('/api/auth/login', methods=['POST'])
-def login():
-    data = request.json
-    
-    user = User.query.filter_by(email=data['email']).first()
-    
-    if not user or not user.check_password(data['password']):
-        return jsonify({'message': 'Invalid credentials!'}), 401
-    
-    # Create token
-    token = jwt.encode({
-        'user_id': user.id,
-        'exp': datetime.utcnow() + timedelta(days=30)
-    }, app.config['SECRET_KEY'])
-    
-    return jsonify({
-        'message': 'Login successful!',
-        'token': token,
-        'user': user.to_dict()
-    })
-
-# Products routes
-@app.route('/api/products', methods=['GET'])
-def get_products():
-    category = request.args.get('category')
-    seller_id = request.args.get('seller_id')
-    market_id = request.args.get('market_id')
-    
-    query = Product.query.filter_by(status='active')
-    
-    if category:
-        query = query.filter_by(category=category)
-    
-    if seller_id:
-        query = query.filter_by(seller_id=seller_id)
-    
-    if market_id:
-        query = query.filter_by(market_id=market_id)
-    
-    products = query.all()
-    
-    return jsonify([{
-        'id': p.id,
-        'name': p.name,
-        'description': p.description,
-        'price': p.price,
-        'category': p.category,
-        'seller': p.seller.to_dict(),
-        'market': p.market.to_dict() if p.market else None,
-        'stock': p.stock,
-        'has_washing': p.has_washing,
-        'washing_price': p.washing_price,
-        'rating': p.rating,
-        'total_ratings': p.total_ratings,
-        'images': json.loads(p.images) if p.images else []
-    } for p in products])
-
-@app.route('/api/products', methods=['POST'])
-@token_required
-@seller_required
-def create_product(current_user):
-    data = request.json
-    
-    product = Product(
-        name=data['name'],
-        description=data.get('description', ''),
-        price=data['price'],
-        category=data.get('category', 'general'),
-        seller_id=current_user.id,
-        market_id=data.get('market_id'),
-        stock=data.get('stock', 0),
-        has_washing=data.get('has_washing', True),
-        washing_price=data.get('washing_price', 100.0),
-        images=json.dumps(data.get('images', []))
-    )
-    
-    db.session.add(product)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Product created successfully!',
-        'product': {
-            'id': product.id,
-            'name': product.name,
-            'price': product.price
-        }
-    }), 201
-
-# Orders routes
-@app.route('/api/orders', methods=['POST'])
-@token_required
-def create_order(current_user):
-    data = request.json
-    
-    # Check cart items
-    items = data['items']
-    if not items:
-        return jsonify({'message': 'Cart is empty!'}), 400
-    
-    # Calculate totals
-    subtotal = sum(item['price'] * item['quantity'] for item in items)
-    washing_price = sum(100 for item in items if item.get('washing', False))
-    total = subtotal + washing_price + data.get('delivery_fee', 0)
-    
-    # Check balance if paying with balance
-    if data.get('payment_method') == 'balance':
-        if current_user.balance < total:
-            return jsonify({'message': 'Insufficient balance!'}), 400
-    
-    # Get seller from first product
-    first_product = Product.query.get(items[0]['product_id'])
-    if not first_product:
-        return jsonify({'message': 'Product not found!'}), 404
-    
-    # Create order
-    order = Order(
-        order_code=f"QAT-{datetime.now().strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}",
-        buyer_id=current_user.id,
-        seller_id=first_product.seller_id,
-        subtotal=subtotal,
-        washing_price=washing_price,
-        delivery_fee=data.get('delivery_fee', 0),
-        total=total,
-        delivery_address=data['delivery_address'],
-        payment_method=data.get('payment_method'),
-        washing_required=washing_price > 0,
-        estimated_delivery=datetime.utcnow() + timedelta(hours=1)
-    )
-    
-    db.session.add(order)
-    db.session.flush()  # Get order ID
-    
-    # Create order items
-    for item_data in items:
-        item = OrderItem(
-            order_id=order.id,
-            product_id=item_data['product_id'],
-            quantity=item_data['quantity'],
-            price=item_data['price'],
-            washing=item_data.get('washing', False),
-            washing_price=100 if item_data.get('washing', False) else 0
-        )
-        db.session.add(item)
-    
-    # Process payment
-    if data.get('payment_method') == 'balance':
-        current_user.balance -= total
-        order.payment_status = 'paid'
-        
-        # Add to seller's balance
-        seller = User.query.get(first_product.seller_id)
-        seller.balance += total
-    
-    # Create notifications
-    notifications = []
-    
-    # Notification to seller
-    seller_notification = Notification(
-        user_id=first_product.seller_id,
-        order_id=order.id,
-        title='طلب جديد',
-        message=f'لديك طلب جديد #{order.order_code}',
-        type='order'
-    )
-    notifications.append(seller_notification)
-    
-    # Notification to washer if washing required
-    if washing_price > 0:
-        washer = Washer.query.filter_by(market_id=first_product.market_id, status='active').first()
-        if washer:
-            order.washer_id = washer.id
-            washer_notification = Notification(
-                user_id=washer.id,
-                order_id=order.id,
-                title='طلب غسيل جديد',
-                message=f'طلب غسيل جديد #{order.order_code}',
-                type='order'
-            )
-            notifications.append(washer_notification)
-    
-    # Notification to driver
-    driver = Driver.query.filter_by(status='available').first()
-    if driver:
-        order.driver_id = driver.id
-        driver_notification = Notification(
-            user_id=driver.id,
-            order_id=order.id,
-            title='مهمة توصيل جديدة',
-            message=f'مهمة توصيل جديدة #{order.order_code}',
-            type='order'
-        )
-        notifications.append(driver_notification)
-    
-    # Add all notifications
-    for notification in notifications:
-        db.session.add(notification)
-    
-    # Create wallet transaction
-    transaction = WalletTransaction(
-        user_id=current_user.id,
-        type='purchase',
-        amount=total,
-        balance_before=current_user.balance + total,
-        balance_after=current_user.balance,
-        reference=order.order_code,
-        description=f'شراء منتجات - طلب #{order.order_code}'
-    )
-    db.session.add(transaction)
-    
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Order created successfully!',
-        'order': {
-            'id': order.id,
-            'order_code': order.order_code,
-            'total': order.total,
-            'estimated_delivery': order.estimated_delivery.isoformat()
-        }
-    }), 201
-
-# Wallet routes
-@app.route('/api/wallet/balance', methods=['GET'])
-@token_required
-def get_balance(current_user):
-    return jsonify({'balance': current_user.balance})
-
-@app.route('/api/wallet/deposit', methods=['POST'])
-@token_required
-def deposit_balance(current_user):
-    data = request.json
-    
-    amount = data['amount']
-    method = data['method']
-    reference = data.get('reference')
-    
-    # Update balance
-    current_user.balance += amount
-    
-    # Create transaction
-    transaction = WalletTransaction(
-        user_id=current_user.id,
-        type='deposit',
-        amount=amount,
-        balance_before=current_user.balance - amount,
-        balance_after=current_user.balance,
-        reference=reference,
-        description=f'شحن رصيد عبر {method}'
-    )
-    db.session.add(transaction)
-    
-    # Create notification
-    notification = Notification(
-        user_id=current_user.id,
-        title='شحن ناجح',
-        message=f'تم شحن {amount} ريال إلى رصيدك',
-        type='payment'
-    )
-    db.session.add(notification)
-    
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Balance deposited successfully!',
-        'new_balance': current_user.balance
-    })
-
-# Admin routes
-@app.route('/api/admin/markets', methods=['GET'])
-@token_required
-@admin_required
-def get_markets_admin(current_user):
-    markets = Market.query.all()
-    return jsonify([{
-        'id': m.id,
-        'name': m.name,
-        'location': m.location,
-        'address': m.address,
-        'phone': m.phone,
-        'manager_name': m.manager_name,
-        'status': m.status,
-        'washers_count': len(m.washers),
-        'products_count': len(m.products),
-        'created_at': m.created_at.isoformat()
-    } for m in markets])
-
-@app.route('/api/admin/markets', methods=['POST'])
-@token_required
-@admin_required
-def create_market(current_user):
-    data = request.json
-    
-    market = Market(
-        name=data['name'],
-        location=data.get('location'),
-        address=data.get('address'),
-        phone=data.get('phone'),
-        manager_name=data.get('manager_name')
-    )
-    
-    db.session.add(market)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Market created successfully!',
-        'market': {
-            'id': market.id,
-            'name': market.name
-        }
-    }), 201
-
-@app.route('/api/admin/washers', methods=['POST'])
-@token_required
-@admin_required
-def create_washer(current_user):
-    data = request.json
-    
-    washer = Washer(
-        name=data['name'],
-        market_id=data['market_id'],
-        phone=data.get('phone'),
-        address=data.get('address'),
-        washing_price=data.get('washing_price', 100.0)
-    )
-    
-    db.session.add(washer)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Washer created successfully!',
-        'washer': {
-            'id': washer.id,
-            'name': washer.name
-        }
-    }), 201
-
-@app.route('/api/admin/drivers', methods=['POST'])
-@token_required
-@admin_required
-def create_driver(current_user):
-    data = request.json
-    
-    driver = Driver(
-        name=data['name'],
-        phone=data.get('phone'),
-        vehicle_type=data.get('vehicle_type'),
-        vehicle_number=data.get('vehicle_number')
-    )
-    
-    db.session.add(driver)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Driver created successfully!',
-        'driver': {
-            'id': driver.id,
-            'name': driver.name
-        }
-    }), 201
-
-# Backup routes
-@app.route('/api/admin/backup', methods=['GET'])
-@token_required
-@admin_required
-def export_backup(current_user):
-    # Export all data to Excel
-    output = BytesIO()
-    
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Export users
-        users = User.query.all()
-        users_data = [u.to_dict() for u in users]
-        pd.DataFrame(users_data).to_excel(writer, sheet_name='Users', index=False)
-        
-        # Export products
-        products = Product.query.all()
-        products_data = [{
-            'id': p.id,
-            'name': p.name,
-            'price': p.price,
-            'category': p.category,
-            'seller': p.seller.name,
-            'stock': p.stock
-        } for p in products]
-        pd.DataFrame(products_data).to_excel(writer, sheet_name='Products', index=False)
-        
-        # Export orders
-        orders = Order.query.all()
-        orders_data = [{
-            'id': o.id,
-            'order_code': o.order_code,
-            'buyer': o.buyer.name,
-            'seller': o.seller.name,
-            'total': o.total,
-            'status': o.order_status,
-            'created_at': o.created_at.isoformat()
-        } for o in orders]
-        pd.DataFrame(orders_data).to_excel(writer, sheet_name='Orders', index=False)
-        
-        # Export markets
-        markets = Market.query.all()
-        markets_data = [{
-            'id': m.id,
-            'name': m.name,
-            'location': m.location,
-            'address': m.address
-        } for m in markets]
-        pd.DataFrame(markets_data).to_excel(writer, sheet_name='Markets', index=False)
-    
-    output.seek(0)
-    
-    return send_file(
-        output,
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        as_attachment=True,
-        download_name=f'qat-backup-{datetime.now().strftime("%Y-%m-%d")}.xlsx'
-    )
-
-# Settings routes
-@app.route('/api/admin/settings', methods=['GET'])
-@token_required
-@admin_required
-def get_settings(current_user):
-    settings = SystemSetting.query.all()
-    return jsonify({s.key: s.value for s in settings})
-
-@app.route('/api/admin/settings', methods=['POST'])
-@token_required
-@admin_required
-def update_settings(current_user):
-    data = request.json
-    
-    for key, value in data.items():
-        setting = SystemSetting.query.filter_by(key=key).first()
-        
-        if setting:
-            setting.value = value
-        else:
-            setting = SystemSetting(key=key, value=value)
-            db.session.add(setting)
-    
-    db.session.commit()
-    
-    return jsonify({'message': 'Settings updated successfully!'})
-
-# Advertisements routes
-@app.route('/api/admin/advertisements', methods=['POST'])
-@token_required
-@admin_required
-def create_advertisement(current_user):
-    data = request.json
-    
-    advertisement = Advertisement(
-        title=data['title'],
-        content=data.get('content'),
-        image_url=data.get('image_url'),
-        type=data.get('type', 'home'),
-        position=data.get('position', 0),
-        start_date=datetime.fromisoformat(data['start_date']) if 'start_date' in data else None,
-        end_date=datetime.fromisoformat(data['end_date']) if 'end_date' in data else None,
-        status=data.get('status', 'active')
-    )
-    
-    if 'user_id' in data:
-        advertisement.user_id = data['user_id']
-    
-    if 'package_id' in data:
-        advertisement.package_id = data['package_id']
-    
-    db.session.add(advertisement)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Advertisement created successfully!',
-        'advertisement': {
-            'id': advertisement.id,
-            'title': advertisement.title
-        }
-    }), 201
-
-# Package routes
-@app.route('/api/admin/packages', methods=['POST'])
-@token_required
-@admin_required
-def create_package(current_user):
-    data = request.json
-    
-    package = AdvertisementPackage(
-        name=data['name'],
-        description=data.get('description'),
-        price=data['price'],
-        duration_days=data['duration_days'],
-        features=json.dumps(data.get('features', [])),
-        max_ads=data.get('max_ads', 1)
-    )
-    
-    db.session.add(package)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Package created successfully!',
-        'package': {
-            'id': package.id,
-            'name': package.name
-        }
-    }), 201
-
-# Gift code routes
-@app.route('/api/admin/gift-codes', methods=['POST'])
-@token_required
-@admin_required
-def create_gift_code(current_user):
-    data = request.json
-    
-    code = GiftCode(
-        code=data.get('code', secrets.token_hex(8).upper()),
-        amount=data['amount'],
-        created_by=current_user.id,
-        expiry_date=datetime.fromisoformat(data['expiry_date']) if 'expiry_date' in data else None
-    )
-    
-    db.session.add(code)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Gift code created successfully!',
-        'code': code.code,
-        'amount': code.amount
-    }), 201
-
-@app.route('/api/wallet/redeem-gift', methods=['POST'])
-@token_required
-def redeem_gift_code(current_user):
-    data = request.json
-    
-    code = GiftCode.query.filter_by(code=data['code'], status='active').first()
-    
-    if not code:
-        return jsonify({'message': 'Invalid or expired gift code!'}), 400
-    
-    if code.expiry_date and code.expiry_date < datetime.utcnow():
-        code.status = 'expired'
-        db.session.commit()
-        return jsonify({'message': 'Gift code has expired!'}), 400
-    
-    # Redeem code
-    current_user.balance += code.amount
-    code.used_by = current_user.id
-    code.used_at = datetime.utcnow()
-    code.status = 'used'
-    
-    # Create transaction
-    transaction = WalletTransaction(
-        user_id=current_user.id,
-        type='deposit',
-        amount=code.amount,
-        balance_before=current_user.balance - code.amount,
-        balance_after=current_user.balance,
-        reference=code.code,
-        description='كود هدية'
-    )
-    db.session.add(transaction)
-    
-    db.session.commit()
-    
-    return jsonify({
-        'message': f'Gift code redeemed successfully! {code.amount} ريال added to your balance.',
-        'new_balance': current_user.balance
-    })
-
-# Withdrawal routes
-@app.route('/api/wallet/withdraw', methods=['POST'])
-@token_required
-def request_withdrawal(current_user):
-    data = request.json
-    
-    amount = data['amount']
-    
-    if amount < 50:
-        return jsonify({'message': 'Minimum withdrawal amount is 50 SAR!'}), 400
-    
-    if current_user.balance < amount:
-        return jsonify({'message': 'Insufficient balance!'}), 400
-    
-    withdrawal = Withdrawal(
-        user_id=current_user.id,
-        amount=amount,
-        wallet_type=data['wallet_type'],
-        wallet_number=data['wallet_number'],
-        wallet_name=data['wallet_name']
-    )
-    
-    # Reserve amount
-    current_user.balance -= amount
-    
-    db.session.add(withdrawal)
-    db.session.commit()
-    
-    return jsonify({
-        'message': 'Withdrawal request submitted successfully!',
-        'request_id': withdrawal.id
-    })
-
-@app.route('/api/admin/withdrawals/<int:withdrawal_id>/approve', methods=['POST'])
-@token_required
-@admin_required
-def approve_withdrawal(current_user, withdrawal_id):
-    withdrawal = Withdrawal.query.get_or_404(withdrawal_id)
-    
-    if withdrawal.status != 'pending':
-        return jsonify({'message': 'Withdrawal already processed!'}), 400
-    
-    withdrawal.status = 'approved'
-    withdrawal.processed_at = datetime.utcnow()
-    
-    db.session.commit()
-    
-    return jsonify({'message': 'Withdrawal approved successfully!'})
-
-# Dashboard stats
-@app.route('/api/admin/stats', methods=['GET'])
-@token_required
-@admin_required
-def get_stats(current_user):
-    total_users = User.query.count()
-    total_sellers = User.query.filter_by(user_type='seller').count()
-    total_buyers = User.query.filter_by(user_type='buyer').count()
-    total_products = Product.query.count()
-    total_orders = Order.query.count()
-    total_revenue = db.session.query(db.func.sum(Order.total)).scalar() or 0
-    
-    recent_orders = Order.query.order_by(Order.created_at.desc()).limit(10).all()
-    
-    return jsonify({
-        'total_users': total_users,
-        'total_sellers': total_sellers,
-        'total_buyers': total_buyers,
-        'total_products': total_products,
-        'total_orders': total_orders,
-        'total_revenue': total_revenue,
-        'recent_orders': [{
-            'id': o.id,
-            'order_code': o.order_code,
-            'total': o.total,
-            'status': o.order_status,
-            'created_at': o.created_at.isoformat()
-        } for o in recent_orders]
-    })
-
-# Initialize database
-@app.before_first_request
-def create_tables():
-    db.create_all()
-    
-    # Create admin user if not exists
-    if not User.query.filter_by(email='admin@qat.com').first():
-        admin = User(
-            name='مدير النظام',
-            email='admin@qat.com',
-            phone='771831482',
-            user_type='admin'
-        )
-        admin.set_password('admin123')
-        admin.balance = 10000
-        db.session.add(admin)
-        db.session.commit()
-    
-    # Create default settings
-    default_settings = {
-        'app_name': 'تطبيق قات',
-        'washing_price': '100',
-        'delivery_fee': '0',
-        'min_withdrawal': '50',
-        'primary_color': '#2E7D32',
-        'secondary_color': '#FF9800',
-        'contact_phone': '771831482',
-        'contact_email': 'support@qat.com'
+// Middleware للمصادقة
+function authenticateToken(req, res, next) {
+    const token = req.session.token || req.headers['authorization'];
+    
+    if (!token) {
+        return res.status(401).json({ error: 'الوصول مرفوض' });
     }
     
-    for key, value in default_settings.items():
-        if not SystemSetting.query.filter_by(key=key).first():
-            setting = SystemSetting(key=key, value=value)
-            db.session.add(setting)
-    
-    db.session.commit()
+    try {
+        const decoded = jwt.verify(token.replace('Bearer ', ''), JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch (error) {
+        res.status(403).json({ error: 'توكن غير صالح' });
+    }
+}
 
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+// Middleware للتحقق من صلاحيات المدير
+function isAdmin(req, res, next) {
+    if (req.user && req.user.role === 'admin') {
+        next();
+    } else {
+        res.status(403).json({ error: 'صلاحيات غير كافية' });
+    }
+}
+
+// Middleware للتحقق من صلاحيات البائع
+function isSeller(req, res, next) {
+    if (req.user && (req.user.role === 'seller' || req.user.role === 'admin')) {
+        next();
+    } else {
+        res.status(403).json({ error: 'صلاحيات غير كافية' });
+    }
+}
+
+// Middleware للتحقق من صلاحيات المشتري
+function isBuyer(req, res, next) {
+    if (req.user && (req.user.role === 'buyer' || req.user.role === 'admin')) {
+        next();
+    } else {
+        res.status(403).json({ error: 'صلاحيات غير كافية' });
+    }
+}
+
+// تكوين البريد الإلكتروني
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: 'your-email@gmail.com',
+        pass: 'your-email-password'
+    }
+});
+
+// إرسال الإشعارات
+async function sendNotification(userId, title, message) {
+    const notification = {
+        id: Date.now(),
+        userId,
+        title,
+        message,
+        read: false,
+        createdAt: new Date().toISOString()
+    };
+    
+    database.notifications.push(notification);
+    saveDatabase();
+    
+    // إرسال بريد إلكتروني إذا كان المستخدم مفعل الإشعارات
+    const user = database.users.find(u => u.id === userId);
+    if (user && user.emailNotifications) {
+        await transporter.sendMail({
+            from: 'qat-app@example.com',
+            to: user.email,
+            subject: title,
+            text: message,
+            html: `<h1>${title}</h1><p>${message}</p>`
+        });
+    }
+}
+
+// المسارات الرئيسية
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'views', 'index.html'));
+});
+
+// المسارات العامة
+app.post('/api/register', async (req, res) => {
+    try {
+        const { name, email, phone, password, role, storeName, vehicleType } = req.body;
+        
+        // التحقق من وجود المستخدم
+        const existingUser = database.users.find(u => u.email === email);
+        if (existingUser) {
+            return res.status(400).json({ error: 'البريد الإلكتروني مسجل بالفعل' });
+        }
+        
+        // تشفير كلمة المرور
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // إنشاء المستخدم
+        const user = {
+            id: Date.now(),
+            name,
+            email,
+            phone,
+            password: hashedPassword,
+            role: role || 'buyer',
+            storeName: role === 'seller' ? storeName : null,
+            vehicleType: role === 'driver' ? vehicleType : null,
+            walletBalance: 0,
+            rating: 0,
+            totalSales: 0,
+            createdAt: new Date().toISOString(),
+            isActive: true,
+            emailNotifications: true,
+            pushNotifications: true
+        };
+        
+        // إنشاء محفظة للمستخدم
+        const wallet = {
+            id: Date.now(),
+            userId: user.id,
+            balance: 0,
+            transactions: [],
+            createdAt: new Date().toISOString()
+        };
+        
+        database.users.push(user);
+        database.wallets.push(wallet);
+        saveDatabase();
+        
+        // إنشاء توكن
+        const token = jwt.sign(
+            { id: user.id, email: user.email, role: user.role },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+        
+        res.json({
+            success: true,
+            token,
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                role: user.role
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'خطأ في إنشاء الحساب' });
+    }
+});
+
+app.post('/api/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        
+        // البحث عن المستخدم
+        const user = database.users.find(u => u.email === email);
+        if (!user) {
+            return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
+        }
+        
+        // التحقق من كلمة المرور
+        const validPassword = await bcrypt.compare(password, user.password);
+        if (!validPassword) {
+            return res.status(400).json({ error: 'بيانات الدخول غير صحيحة' });
+        }
+        
+        // إنشاء توكن
+        const token = jwt.sign(
+            { id: user.id, email: user.email, role: user.role },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+        
+        // حفظ في الجلسة
+        req.session.token = token;
+        req.session.userId = user.id;
+        
+        res.json({
+            success: true,
+            token,
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                walletBalance: user.walletBalance
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'خطأ في تسجيل الدخول' });
+    }
+});
+
+// مسارات المدير
+app.get('/api/admin/dashboard', authenticateToken, isAdmin, (req, res) => {
+    const stats = {
+        totalUsers: database.users.length,
+        totalSellers: database.users.filter(u => u.role === 'seller').length,
+        totalBuyers: database.users.filter(u => u.role === 'buyer').length,
+        totalDrivers: database.users.filter(u => u.role === 'driver').length,
+        totalProducts: database.products.length,
+        totalOrders: database.orders.length,
+        totalRevenue: database.orders.reduce((sum, order) => sum + order.totalAmount, 0),
+        pendingOrders: database.orders.filter(o => o.status === 'pending').length,
+        activeMarkets: database.markets.filter(m => m.isActive).length,
+        activeWashingStations: database.washingStations.filter(w => w.isActive).length
+    };
+    
+    res.json({ success: true, stats });
+});
+
+// إدارة الأسواق
+app.post('/api/admin/markets', authenticateToken, isAdmin, (req, res) => {
+    const { name, location, address, phone, managerName, isActive } = req.body;
+    
+    const market = {
+        id: Date.now(),
+        name,
+        location,
+        address,
+        phone,
+        managerName,
+        isActive: isActive !== false,
+        washingStations: [],
+        createdAt: new Date().toISOString()
+    };
+    
+    database.markets.push(market);
+    saveDatabase();
+    
+    res.json({ success: true, market });
+});
+
+// إدارة مغاسل القات
+app.post('/api/admin/washing-stations', authenticateToken, isAdmin, (req, res) => {
+    const { name, marketId, location, phone, managerName, washingPrice, isActive } = req.body;
+    
+    const washingStation = {
+        id: Date.now(),
+        name,
+        marketId: parseInt(marketId),
+        location,
+        phone,
+        managerName,
+        washingPrice: washingPrice || 100,
+        isActive: isActive !== false,
+        createdAt: new Date().toISOString()
+    };
+    
+    database.washingStations.push(washingStation);
+    saveDatabase();
+    
+    res.json({ success: true, washingStation });
+});
+
+// إدارة مندوبي التوصيل
+app.post('/api/admin/drivers', authenticateToken, isAdmin, (req, res) => {
+    const { name, phone, vehicleType, vehicleNumber, marketId, isActive } = req.body;
+    
+    const driver = {
+        id: Date.now(),
+        name,
+        phone,
+        vehicleType,
+        vehicleNumber,
+        marketId: parseInt(marketId),
+        isActive: isActive !== false,
+        rating: 0,
+        completedOrders: 0,
+        currentLocation: null,
+        isAvailable: true,
+        createdAt: new Date().toISOString()
+    };
+    
+    database.drivers.push(driver);
+    saveDatabase();
+    
+    res.json({ success: true, driver });
+});
+
+// إنشاء كوبونات هدايا
+app.post('/api/admin/coupons', authenticateToken, isAdmin, (req, res) => {
+    const { code, amount, expiresAt, maxUses, isActive } = req.body;
+    
+    const coupon = {
+        id: Date.now(),
+        code,
+        amount: parseFloat(amount),
+        expiresAt,
+        maxUses: parseInt(maxUses) || 1,
+        usedCount: 0,
+        isActive: isActive !== false,
+        createdAt: new Date().toISOString()
+    };
+    
+    database.coupons.push(coupon);
+    saveDatabase();
+    
+    res.json({ success: true, coupon });
+});
+
+// إنشاء باقات إعلانية
+app.post('/api/admin/ad-packages', authenticateToken, isAdmin, (req, res) => {
+    const { name, description, price, duration, features, isActive } = req.body;
+    
+    const package = {
+        id: Date.now(),
+        name,
+        description,
+        price: parseFloat(price),
+        duration: parseInt(duration), // بالأيام
+        features: Array.isArray(features) ? features : [],
+        isActive: isActive !== false,
+        createdAt: new Date().toISOString()
+    };
+    
+    database.packages.push(package);
+    saveDatabase();
+    
+    res.json({ success: true, package });
+});
+
+// نسخ احتياطي لقاعدة البيانات
+app.get('/api/admin/backup', authenticateToken, isAdmin, async (req, res) => {
+    try {
+        const workbook = new ExcelJS.Workbook();
+        
+        // إنشاء أوراق للبيانات
+        const sheets = [
+            { name: 'users', data: database.users },
+            { name: 'products', data: database.products },
+            { name: 'orders', data: database.orders },
+            { name: 'markets', data: database.markets },
+            { name: 'washingStations', data: database.washingStations },
+            { name: 'drivers', data: database.drivers },
+            { name: 'transactions', data: database.transactions }
+        ];
+        
+        for (const sheet of sheets) {
+            const worksheet = workbook.addWorksheet(sheet.name);
+            
+            if (sheet.data.length > 0) {
+                // إضافة العناوين
+                const headers = Object.keys(sheet.data[0]);
+                worksheet.addRow(headers);
+                
+                // إضافة البيانات
+                sheet.data.forEach(item => {
+                    const row = headers.map(header => item[header]);
+                    worksheet.addRow(row);
+                });
+            }
+        }
+        
+        // حفظ الملف
+        const fileName = `backup-${Date.now()}.xlsx`;
+        const filePath = path.join(__dirname, 'backups', fileName);
+        
+        await workbook.xlsx.writeFile(filePath);
+        
+        // حفظ معلومات النسخ الاحتياطي
+        const backup = {
+            id: Date.now(),
+            fileName,
+            filePath,
+            createdAt: new Date().toISOString(),
+            createdBy: req.user.id
+        };
+        
+        database.backups.push(backup);
+        saveDatabase();
+        
+        res.json({ success: true, fileName, downloadUrl: `/backups/${fileName}` });
+    } catch (error) {
+        res.status(500).json({ error: 'خطأ في إنشاء النسخة الاحتياطية' });
+    }
+});
+
+// مسارات البائعين
+app.get('/api/seller/products', authenticateToken, isSeller, (req, res) => {
+    const sellerId = req.user.id;
+    const sellerProducts = database.products.filter(p => p.sellerId === sellerId);
+    
+    res.json({ success: true, products: sellerProducts });
+});
+
+app.post('/api/seller/products', authenticateToken, isSeller, upload.array('images', 5), (req, res) => {
+    const { name, description, price, category, quantity, marketId } = req.body;
+    const images = req.files ? req.files.map(f => f.filename) : [];
+    
+    const product = {
+        id: Date.now(),
+        sellerId: req.user.id,
+        name,
+        description,
+        price: parseFloat(price),
+        originalPrice: parseFloat(price),
+        category,
+        quantity: parseInt(quantity),
+        marketId: parseInt(marketId),
+        images,
+        rating: 0,
+        totalSold: 0,
+        reviews: [],
+        isActive: true,
+        requiresWashing: false,
+        washingPrice: 100,
+        createdAt: new Date().toISOString()
+    };
+    
+    database.products.push(product);
+    saveDatabase();
+    
+    res.json({ success: true, product });
+});
+
+// طلبات البائع
+app.get('/api/seller/orders', authenticateToken, isSeller, (req, res) => {
+    const sellerId = req.user.id;
+    
+    // جلب طلبات منتجات البائع
+    const sellerOrders = database.orders.filter(order => 
+        order.items.some(item => {
+            const product = database.products.find(p => p.id === item.productId);
+            return product && product.sellerId === sellerId;
+        })
+    );
+    
+    res.json({ success: true, orders: sellerOrders });
+});
+
+// سحب الأموال
+app.post('/api/seller/withdraw', authenticateToken, isSeller, (req, res) => {
+    const { amount, walletType, walletPhone, walletName } = req.body;
+    const sellerId = req.user.id;
+    
+    // التحقق من رصيد البائع
+    const seller = database.users.find(u => u.id === sellerId);
+    if (!seller || seller.walletBalance < amount) {
+        return res.status(400).json({ error: 'رصيد غير كافي' });
+    }
+    
+    // خصم المبلغ
+    seller.walletBalance -= parseFloat(amount);
+    
+    // تسجيل المعاملة
+    const transaction = {
+        id: Date.now(),
+        userId: sellerId,
+        type: 'withdrawal',
+        amount: parseFloat(amount),
+        walletType,
+        walletPhone,
+        walletName,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+    };
+    
+    database.transactions.push(transaction);
+    saveDatabase();
+    
+    // إرسال إشعار للمدير
+    sendNotification(
+        database.users.find(u => u.role === 'admin')?.id,
+        'طلب سحب أموال',
+        `طلب البائع ${seller.name} سحب مبلغ ${amount} ريال`
+    );
+    
+    res.json({ success: true, transaction });
+});
+
+// مسارات المشترين
+app.get('/api/buyer/products', authenticateToken, isBuyer, (req, res) => {
+    const products = database.products.filter(p => p.isActive && p.quantity > 0);
+    res.json({ success: true, products });
+});
+
+app.post('/api/buyer/cart/add', authenticateToken, isBuyer, (req, res) => {
+    const { productId, quantity, requiresWashing } = req.body;
+    
+    const product = database.products.find(p => p.id === parseInt(productId));
+    if (!product) {
+        return res.status(404).json({ error: 'المنتج غير موجود' });
+    }
+    
+    if (product.quantity < quantity) {
+        return res.status(400).json({ error: 'الكمية غير متوفرة' });
+    }
+    
+    // حساب السعر النهائي
+    let finalPrice = product.price * quantity;
+    if (requiresWashing) {
+        finalPrice += product.washingPrice * quantity;
+    }
+    
+    // إضافة للسلة (في حالة حقيقية، سيكون هناك جدول للسلة)
+    const cartItem = {
+        productId: product.id,
+        productName: product.name,
+        quantity,
+        price: product.price,
+        requiresWashing,
+        washingPrice: requiresWashing ? product.washingPrice : 0,
+        totalPrice: finalPrice,
+        sellerId: product.sellerId,
+        marketId: product.marketId
+    };
+    
+    res.json({ success: true, cartItem });
+});
+
+// إنشاء طلب
+app.post('/api/buyer/order/create', authenticateToken, isBuyer, async (req, res) => {
+    try {
+        const { items, deliveryAddress, paymentMethod, couponCode } = req.body;
+        const buyerId = req.user.id;
+        
+        // التحقق من المنتجات والكميات
+        let totalAmount = 0;
+        const orderItems = [];
+        
+        for (const item of items) {
+            const product = database.products.find(p => p.id === item.productId);
+            if (!product) {
+                return res.status(404).json({ error: `المنتج ${item.productId} غير موجود` });
+            }
+            
+            if (product.quantity < item.quantity) {
+                return res.status(400).json({ error: `الكمية غير متوفرة للمنتج ${product.name}` });
+            }
+            
+            // حساب سعر المنتج
+            let itemPrice = product.price * item.quantity;
+            if (item.requiresWashing) {
+                itemPrice += product.washingPrice * item.quantity;
+            }
+            
+            totalAmount += itemPrice;
+            
+            orderItems.push({
+                ...item,
+                productName: product.name,
+                itemPrice
+            });
+            
+            // خصم الكمية من المخزون
+            product.quantity -= item.quantity;
+            product.totalSold += item.quantity;
+        }
+        
+        // تطبيق الكوبون إذا كان موجوداً
+        let discount = 0;
+        if (couponCode) {
+            const coupon = database.coupons.find(c => c.code === couponCode && c.isActive);
+            if (coupon) {
+                if (coupon.usedCount < coupon.maxUses && new Date(coupon.expiresAt) > new Date()) {
+                    discount = coupon.amount;
+                    coupon.usedCount++;
+                }
+            }
+        }
+        
+        totalAmount -= discount;
+        
+        // التحقق من رصيد المشتري
+        const buyer = database.users.find(u => u.id === buyerId);
+        if (!buyer) {
+            return res.status(404).json({ error: 'المشتري غير موجود' });
+        }
+        
+        if (paymentMethod === 'wallet' && buyer.walletBalance < totalAmount) {
+            return res.status(400).json({ error: 'رصيد غير كافي' });
+        }
+        
+        // خصم المبلغ من رصيد المشتري
+        if (paymentMethod === 'wallet') {
+            buyer.walletBalance -= totalAmount;
+        }
+        
+        // إنشاء رمز الطلب (باركود)
+        const orderCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+        
+        // البحث عن مغسلة في نفس السوق
+        const firstProduct = database.products.find(p => p.id === items[0].productId);
+        const washingStation = database.washingStations.find(w => 
+            w.marketId === firstProduct.marketId && w.isActive
+        );
+        
+        // البحث عن مندوب توصيل متاح
+        const availableDriver = database.drivers.find(d => 
+            d.marketId === firstProduct.marketId && d.isAvailable && d.isActive
+        );
+        
+        // إنشاء الطلب
+        const order = {
+            id: Date.now(),
+            buyerId,
+            items: orderItems,
+            totalAmount,
+            discount,
+            deliveryAddress,
+            paymentMethod,
+            status: 'pending',
+            paymentStatus: paymentMethod === 'wallet' ? 'paid' : 'pending',
+            orderCode,
+            washingStationId: washingStation ? washingStation.id : null,
+            driverId: availableDriver ? availableDriver.id : null,
+            sellerIds: [...new Set(orderItems.map(item => {
+                const product = database.products.find(p => p.id === item.productId);
+                return product.sellerId;
+            }))],
+            createdAt: new Date().toISOString(),
+            estimatedDelivery: new Date(Date.now() + 60 * 60 * 1000).toISOString() // بعد ساعة
+        };
+        
+        database.orders.push(order);
+        
+        // إضافة المبلغ لحسابات البائعين
+        orderItems.forEach(item => {
+            const product = database.products.find(p => p.id === item.productId);
+            if (product) {
+                const seller = database.users.find(u => u.id === product.sellerId);
+                if (seller) {
+                    seller.walletBalance += item.itemPrice;
+                    seller.totalSales += item.itemPrice;
+                }
+            }
+        });
+        
+        saveDatabase();
+        
+        // إرسال الإشعارات
+        // 1. للمشتري
+        await sendNotification(
+            buyerId,
+            'تم إنشاء طلبك بنجاح',
+            `تم إنشاء طلبك برقم #${order.id} والمبلغ ${totalAmount} ريال`
+        );
+        
+        // 2. للبائعين
+        order.sellerIds.forEach(async sellerId => {
+            await sendNotification(
+                sellerId,
+                'طلب جديد',
+                `لديك طلب جديد برقم #${order.id}`
+            );
+        });
+        
+        // 3. لمغسلة القات إذا كانت مطلوبة
+        if (washingStation && items.some(item => item.requiresWashing)) {
+            await sendNotification(
+                washingStation.managerId || database.users.find(u => u.role === 'admin')?.id,
+                'طلب غسل قات',
+                `طلب جديد لغسل قات برقم #${order.id}`
+            );
+        }
+        
+        // 4. لمندوب التوصيل
+        if (availableDriver) {
+            await sendNotification(
+                availableDriver.userId || database.users.find(u => u.role === 'admin')?.id,
+                'طلب توصيل',
+                `طلب توصيل جديد برقم #${order.id}`
+            );
+        }
+        
+        res.json({ 
+            success: true, 
+            order,
+            orderCode,
+            message: 'تم إنشاء الطلب بنجاح'
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: 'خطأ في إنشاء الطلب' });
+    }
+});
+
+// شحن الرصيد
+app.post('/api/wallet/topup', authenticateToken, (req, res) => {
+    const { amount, walletType, transactionId, phone } = req.body;
+    const userId = req.user.id;
+    
+    const user = database.users.find(u => u.id === userId);
+    if (!user) {
+        return res.status(404).json({ error: 'المستخدم غير موجود' });
+    }
+    
+    // تسجيل المعاملة
+    const transaction = {
+        id: Date.now(),
+        userId,
+        type: 'deposit',
+        amount: parseFloat(amount),
+        walletType,
+        transactionId,
+        phone,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+    };
+    
+    database.transactions.push(transaction);
+    
+    // في حالة حقيقية، هنا يتم التحقق من المعاملة عبر بوابة الدفع
+    // ولكن في هذا المثال، نفترض أن الدفع تم بنجاح
+    
+    setTimeout(() => {
+        transaction.status = 'completed';
+        user.walletBalance += parseFloat(amount);
+        saveDatabase();
+        
+        sendNotification(
+            userId,
+            'تم شحن الرصيد',
+            `تم شحن مبلغ ${amount} ريال إلى محفظتك`
+        );
+    }, 2000);
+    
+    res.json({ 
+        success: true, 
+        transaction,
+        message: 'جاري معالجة طلب الشحن'
+    });
+});
+
+// تطبيق الكوبون
+app.post('/api/coupon/apply', authenticateToken, (req, res) => {
+    const { code } = req.body;
+    
+    const coupon = database.coupons.find(c => c.code === code);
+    if (!coupon) {
+        return res.status(404).json({ error: 'كود الخصم غير صحيح' });
+    }
+    
+    if (!coupon.isActive) {
+        return res.status(400).json({ error: 'كود الخصم غير فعال' });
+    }
+    
+    if (coupon.usedCount >= coupon.maxUses) {
+        return res.status(400).json({ error: 'تم استخدام الحد الأقصى لرمز الخصم' });
+    }
+    
+    if (new Date(coupon.expiresAt) < new Date()) {
+        return res.status(400).json({ error: 'انتهت صلاحية كود الخصم' });
+    }
+    
+    res.json({ 
+        success: true, 
+        coupon: {
+            code: coupon.code,
+            amount: coupon.amount
+        }
+    });
+});
+
+// شراء باقة إعلانية
+app.post('/api/ad/buy', authenticateToken, isSeller, (req, res) => {
+    const { packageId } = req.body;
+    const sellerId = req.user.id;
+    
+    const adPackage = database.packages.find(p => p.id === parseInt(packageId));
+    if (!adPackage) {
+        return res.status(404).json({ error: 'الباقة غير موجودة' });
+    }
+    
+    if (!adPackage.isActive) {
+        return res.status(400).json({ error: 'الباقة غير فعالة' });
+    }
+    
+    const seller = database.users.find(u => u.id === sellerId);
+    if (!seller) {
+        return res.status(404).json({ error: 'البائع غير موجود' });
+    }
+    
+    if (seller.walletBalance < adPackage.price) {
+        return res.status(400).json({ error: 'رصيد غير كافي' });
+    }
+    
+    // خصم المبلغ
+    seller.walletBalance -= adPackage.price;
+    
+    // إنشاء الإعلان
+    const advertisement = {
+        id: Date.now(),
+        sellerId,
+        packageId: adPackage.id,
+        packageName: adPackage.name,
+        price: adPackage.price,
+        startDate: new Date().toISOString(),
+        endDate: new Date(Date.now() + adPackage.duration * 24 * 60 * 60 * 1000).toISOString(),
+        status: 'active',
+        impressions: 0,
+        clicks: 0,
+        createdAt: new Date().toISOString()
+    };
+    
+    database.advertisements.push(advertisement);
+    saveDatabase();
+    
+    sendNotification(
+        sellerId,
+        'تم شراء الباقة الإعلانية',
+        `تم تفعيل الباقة ${adPackage.name} لمدة ${adPackage.duration} أيام`
+    );
+    
+    res.json({ success: true, advertisement });
+});
+
+// تحميل قاعدة البيانات عند بدء التشغيل
+loadDatabase();
+
+// إنشاء مجلد النسخ الاحتياطي إذا لم يكن موجوداً
+const backupsDir = path.join(__dirname, 'backups');
+if (!fs.existsSync(backupsDir)) {
+    fs.mkdirSync(backupsDir, { recursive: true });
+}
+
+// تشغيل الخادم
+app.listen(PORT, () => {
+    console.log(`✅ الخادم يعمل على http://localhost:${PORT}`);
+    console.log(`✅ API متاح على http://localhost:${PORT}/api`);
+});
+
+// تصدير للتشغيل على Render.com
+module.exports = app;
